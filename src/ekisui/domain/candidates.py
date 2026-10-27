@@ -318,6 +318,7 @@ def _span_from_glyphs(
         category=category,
         checked=checked,
         action=action,
+        indexes=tuple(positions),
     )
 
 
@@ -369,16 +370,30 @@ def _scan_name(text: str, start: int) -> tuple[int, int] | None:
         tokens += 1
         name_end = probe
         index = probe
-    if name_end < len(text) and "ぁ" <= text[name_end] <= "ん":
+    if name_end < len(text) and "ぁ" <= text[name_end] <= "ん" and not _particle_at(text, name_end):
         return None
     count = sum(1 for char in text[name_start:name_end] if _is_name_char(char))
-    if count < 2:
+    if count < 1:
         return None
     return name_start, name_end
 
 
+_PARTICLES = (
+    "です", "ます", "した", "して", "から", "まで", "より", "こと", "もの", "ため", "さん",
+    "は", "の", "に", "を", "が", "で", "と", "も", "へ", "や",
+)
+
+
+def _particle_at(text: str, index: int) -> bool:
+    rest = text[index:]
+    return any(rest.startswith(particle) for particle in _PARTICLES)
+
+
 def _one_token(text: str) -> bool:
-    return " " not in text and "\u3000" not in text and sum(1 for char in text if _is_name_char(char)) <= 4
+    if " " in text or "\u3000" in text:
+        return False
+    count = sum(1 for char in text if _is_name_char(char))
+    return 1 <= count <= 3
 
 
 def _leading_given(text: str) -> tuple[int, int] | None:
@@ -395,7 +410,7 @@ def _leading_given(text: str) -> tuple[int, int] | None:
     end = index
     while end < len(text) and _is_name_char(text[end]):
         end += 1
-    if not 1 <= end - index <= 4:
+    if not 1 <= end - index <= 4 or text[index:end] in {"以上", "記", "殿", "御中", "様"}:
         return None
     rest = text[end:].strip()
     if rest and rest[0] not in "…・、。）)" and any(_is_name_char(char) for char in rest):
@@ -434,17 +449,21 @@ def _hit_from_span(span: Span) -> Hit:
     )
 
 
+def _covered(span: Span) -> set[int]:
+    if span.indexes:
+        return set(span.indexes)
+    return set(range(span.start, span.end))
+
+
 def _resolve_overlaps(spans: list[Span]) -> list[Span]:
     ordered = sorted(
         spans,
-        key=lambda span: (-(span.end - span.start), _PRIORITY.get(span.category, 9), span.start),
+        key=lambda span: (-len(_covered(span)), _PRIORITY.get(span.category, 9), span.start),
     )
     kept: list[Span] = []
     for span in ordered:
-        if any(
-            other.page_index == span.page_index and other.start < span.end and span.start < other.end
-            for other in kept
-        ):
+        covered = _covered(span)
+        if any(other.page_index == span.page_index and covered & _covered(other) for other in kept):
             continue
         kept.append(span)
     return kept

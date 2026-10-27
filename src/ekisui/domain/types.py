@@ -219,7 +219,7 @@ class Hit:
     explanation: str
     line_ids: tuple[str, ...]
     ocr_like: bool = False
-    # False for an address that does not look like a place. The row stays off.
+    # Every automatic hit starts checked, including a bare prefecture.
     checked: bool = True
 
 
@@ -255,3 +255,5 @@ class Span:
     checked: bool = True
     # None keeps the category default. Public-body addresses override it to blackout.
     action: Action | None = None
+    # Glyph indexes when the span is not one contiguous run (a name split by a gap).
+    indexes: tuple[int, ...] = ()

@@ -262,6 +262,10 @@ class Session:
 
     def adjust_hit(self, hit_id: str, edge: str, page_x: float) -> None:
         tracked = self._hit(hit_id)
+        # A name split across lines is one box. Snapping it onto the first line
+        # would leave the rest of the name in the saved PDF.
+        if len(tracked.hit.line_ids) > 1:
+            return
         self._ensure_span(tracked)
         if tracked.start < 0 or not tracked.line_id:
             return

@@ -603,6 +603,7 @@ class MainWindow(QMainWindow):
                         "bbox": tracked.hit.bbox,
                         "kind": tracked.hit.kind,
                         "adjusted": tracked.adjusted,
+                        "line_ids": tracked.hit.line_ids,
                     }
                 )
         boxes = redaction_boxes(

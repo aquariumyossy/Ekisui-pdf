@@ -149,11 +149,15 @@ def test_missing_layout_package_still_extracts_searches_and_redacts(tmp_path):
         """
     )
     env = os_env_without_layout_preload()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
     result = subprocess.run(
         [sys.executable, "-c", script],
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
         check=False,
         env=env,
@@ -168,4 +172,6 @@ def os_env_without_layout_preload():
 
     env = os.environ.copy()
     env.pop("PYMUPDF_LAYOUT", None)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
     return env

@@ -34,6 +34,23 @@ def test_split_name_joins_the_next_short_line():
     assert group.hits[0].included
 
 
+def test_seal_gap_keeps_the_name_when_a_particle_follows():
+    session = _session(["裁判所書記官　小野　○　美奈は出席した"])
+    group = _person(session, "小野")
+    assert "美奈" in group.canonical
+    assert "書記官" not in group.canonical
+
+
+def test_split_name_keeps_a_phone_on_the_first_line():
+    session = _session(["裁判所書記官　小野　03-1234-5678", "美奈"])
+    group = _person(session, "小野")
+    assert "美奈" in group.canonical
+    phones = [item for item in session.groups if item.category == Category.PHONE]
+    assert phones and "03-1234-5678" in phones[0].canonical
+    session.adjust_hit(group.hits[0].id, "right", 0)
+    assert "美奈" in group.hits[0].hit.surface
+
+
 def test_hiragana_given_name_is_not_a_person():
     session = _session(["申立人　山田たろう", "吉田 秀平"])
     people = [group.canonical for group in session.groups if group.category == Category.PERSON]

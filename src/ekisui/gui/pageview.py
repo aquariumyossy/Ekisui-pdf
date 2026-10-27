@@ -298,7 +298,7 @@ class PageCanvas(QWidget):
         if not self.selected_hit or not self.show_hits or self.show_boxes:
             return None
         for hit in self.hits:
-            if hit["id"] != self.selected_hit:
+            if hit["id"] != self.selected_hit or len(hit.get("line_ids") or ()) > 1:
                 continue
             mapped = self._map(hit["bbox"])
             if self._handle_rect(mapped, "left").contains(pos):
@@ -356,7 +356,7 @@ class PageCanvas(QWidget):
                     painter.setPen(Qt.PenStyle.NoPen)
                     painter.setBrush(QColor("#0f6cbd"))
                     painter.drawEllipse(self._marker_rect(mapped))
-                if hit["id"] == self.selected_hit:
+                if hit["id"] == self.selected_hit and len(hit.get("line_ids") or ()) <= 1:
                     painter.setPen(QPen(QColor("#0f6cbd"), 1.2))
                     painter.setBrush(QColor("#ffffff"))
                     painter.drawRect(self._handle_rect(mapped, "left"))

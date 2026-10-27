@@ -9,7 +9,7 @@ from ekisui.paths import resource_path
 
 _MARKERS = ("振興局", "市", "区", "町", "村", "郡", "島")
 _PUNCT = set("、。，．）)」』」")
-_HYPHEN = set("-－ー−‐‑")
+_HYPHEN = set("-－ー−‐‑ｰ")
 _STOP = ("において", "の住所")
 _AFTER_SPACE = (
     "被告",
@@ -26,6 +26,8 @@ _AFTER_SPACE = (
     "の住所",
 )
 _BUILDING = ("号室", "マンション", "アパート", "ビル", "ハイツ", "コーポ", "荘", "棟", "階")
+# These start the next clause. が and の stay inside 霞が関 and 番地の2.
+_CLAUSE = set("にはをへとでもや")
 
 
 def load_address_bodies() -> tuple[str, ...]:
@@ -119,8 +121,9 @@ def _classify_and_end(
     for word in bodies:
         if not text.startswith(word, cursor):
             continue
-        # 立川市 is a municipality. 立病院 is a metropolitan facility.
-        if word == "立" and _has_marker(text[cursor : cursor + 8]):
+        # 下関市、内子町、立川市 start with a body word but are municipalities.
+        # 知事は中央区 stops at は, so the later 区 does not pull the office in.
+        if _body_is_municipality(text, cursor):
             return "place", _extend(text, after, prefectures)
         end = cursor + len(word)
         if word == "立":
@@ -150,6 +153,24 @@ def _address_prefix(text: str, start: int, limit: int) -> str:
 
 def _has_marker(text: str) -> bool:
     return any(marker in text for marker in _MARKERS)
+
+
+def _body_is_municipality(text: str, cursor: int) -> bool:
+    """Kanji after the prefecture, stopping before a hiragana particle."""
+    chunk: list[str] = []
+    index = cursor
+    while index < len(text) and len(chunk) < 8:
+        char = text[index]
+        if char.isspace():
+            index += 1
+            continue
+        if _hiragana(char) or char in _PUNCT or char == "で":
+            break
+        if not (_kanji(char) or char == "々"):
+            break
+        chunk.append(char)
+        index += 1
+    return _has_marker("".join(chunk))
 
 
 def _extend(text: str, start: int, prefectures: tuple[str, ...]) -> int:
@@ -202,16 +223,21 @@ def _continues(text: str, index: int) -> bool:
 
 
 def _address_char(char: str) -> bool:
-    if char.isdigit() or char in _HYPHEN:
+    if char.isdigit() or char in _HYPHEN or char == "々":
         return True
+    # さいたま市、霞が関、番地の2. Clause particles such as に still end the span.
     if _hiragana(char):
-        return False
-    code = ord(char)
-    if 0x4E00 <= code <= 0x9FFF or 0x30A0 <= code <= 0x30FF:
+        return char not in _CLAUSE
+    if _kanji(char) or 0x30A0 <= ord(char) <= 0x30FF:
         return True
+    code = ord(char)
     if 0xFF10 <= code <= 0xFF19 or 0xFF21 <= code <= 0xFF3A or 0xFF41 <= code <= 0xFF5A:
         return True
     return char.isascii() and char.isalnum()
+
+
+def _kanji(char: str) -> bool:
+    return 0x4E00 <= ord(char) <= 0x9FFF
 
 
 def _hiragana(char: str) -> bool:

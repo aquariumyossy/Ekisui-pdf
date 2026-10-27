@@ -156,6 +156,42 @@ def test_offices_and_bare_prefectures_are_prechecked_blackouts():
     assert place.pseudonym == "住所A"
 
 
+def test_hiragana_towns_and_body_words_that_are_towns():
+    session = _session(
+        [
+            "埼玉県さいたま市浦和区高砂3-15-1",
+            "東京都千代田区霞が関1-1-1",
+            "石川県野々市市本町",
+            "東京都渋谷区代々木1-2-3",
+            "静岡県下田市1-2-3",
+            "愛媛県内子町",
+            "東京都知事は中央区に住む",
+            "東京都立病院に入院",
+            "東京都立川市栄町",
+        ]
+    )
+    groups = [group for group in session.groups if group.category == Category.ADDRESS]
+    saitama = _one(groups, "さいたま市")
+    assert "3-15-1" in saitama.canonical and saitama.action == Action.REPLACE
+    kasumi = _one(groups, "霞が関")
+    assert "1-1-1" in kasumi.canonical and kasumi.action == Action.REPLACE
+    nonoichi = _one(groups, "野々市")
+    assert nonoichi.action == Action.REPLACE
+    yoyogi = _one(groups, "代々木")
+    assert "1-2-3" in yoyogi.canonical
+    shimoda = _one(groups, "下田市")
+    assert "1-2-3" in shimoda.canonical and shimoda.action == Action.REPLACE
+    assert shimoda.canonical != "静岡県下"
+    uchiko = _one(groups, "内子町")
+    assert uchiko.action == Action.REPLACE
+    governor = _one(groups, "知事")
+    assert governor.canonical == "東京都知事" and governor.action == Action.BLACKOUT
+    hospital = _one(groups, "立病院")
+    assert hospital.canonical == "東京都立病院" and hospital.action == Action.BLACKOUT
+    tachikawa = _one(groups, "立川市")
+    assert tachikawa.action == Action.REPLACE
+
+
 def test_honseki_box_covers_higashi_through_ban():
     for boxes in (True, False):
         text = HONSEKI

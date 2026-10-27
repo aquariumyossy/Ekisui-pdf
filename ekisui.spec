@@ -98,7 +98,8 @@ exe = EXE(
     exclude_binaries=True,
     name="ekisui-pdf",
     console=False,
-    disable_windowed_traceback=False,
+    # A crash dialog would block the installer job, which waits for this exe.
+    disable_windowed_traceback=True,
 )
 coll = COLLECT(
     exe,

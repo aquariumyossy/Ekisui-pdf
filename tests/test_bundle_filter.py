@@ -1,4 +1,4 @@
-from ekisui.bundle_filter import excluded_bundle_dest, excluded_module, shipped_name
+from ekisui.bundle_filter import excluded_bundle_dest, excluded_module, keep_toc_entry, shipped_name
 
 
 def test_shipped_name_joins_the_destination_directory():
@@ -97,3 +97,17 @@ def test_excluded_modules_leave_the_runtime_packages():
     assert not excluded_module("PySide6.QtGui")
     assert not excluded_module("PySide6.QtWidgets")
     assert not excluded_module("PySide6.support.deprecated")
+    assert excluded_module("numpy.lib.tests.test_io")
+    assert excluded_module("numpy.f2py.rules")
+    assert not excluded_module("numpy.lib")
+    assert not excluded_module("numpy.lib.stride_tricks")
+
+
+def test_module_rows_are_not_judged_as_files():
+    source = r"C:\Users\me\examples\ekisui\.venv\Lib\site-packages\numpy\lib\__init__.py"
+    assert keep_toc_entry(("numpy.lib", source, "PYMODULE"))
+    assert not keep_toc_entry(("numpy.lib.tests.test_io", source, "PYMODULE"))
+    qt = r"C:\Users\me\examples\ekisui\.venv\Lib\site-packages\PySide6\Qt6Core.dll"
+    assert keep_toc_entry(("PySide6/Qt6Core.dll", qt, "BINARY"))
+    assert excluded_bundle_dest("pymupdf4llm/__init__.py")
+    assert not keep_toc_entry(("pymupdf4llm/__init__.py", r"C:\wheels\pymupdf4llm\__init__.py", "DATA"))

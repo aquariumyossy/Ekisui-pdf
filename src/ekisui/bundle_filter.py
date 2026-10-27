@@ -98,6 +98,10 @@ def analysis_excludes() -> list[str]:
 def excluded_module(name: str) -> bool:
     """True when this import name must not be frozen into the app."""
     module = name.strip().lower()
+    parts = [part for part in module.split(".") if part]
+    # numpy.tests does not cover numpy.lib.tests. Those imports pull pytest in.
+    if parts and parts[0] == "numpy" and ({"tests", "f2py", "conftest"} & set(parts[1:])):
+        return True
     for prefix in _EXCLUDED_PREFIXES:
         if module == prefix or module.startswith(prefix + "."):
             return True
@@ -133,7 +137,8 @@ def excluded_bundle_dest(path: str) -> bool:
     name = parts[-1]
     if name in {"opengl32sw.dll", "icudtl.dat"}:
         return False
-    if _under(parts, "pymupdf", {"layout"}) or "mupdf-devel" in parts:
+    # pymupdf4llm imports pymupdf.layout and loads ONNX as soon as it imports.
+    if "pymupdf4llm" in parts or _under(parts, "pymupdf", {"layout"}) or "mupdf-devel" in parts:
         return True
     if name.endswith(".lib"):
         return True
@@ -166,13 +171,18 @@ def excluded_bundle_dest(path: str) -> bool:
 
 
 def keep_toc_entry(entry: tuple) -> bool:
+    """Keep a TOC row.
+
+    Pure-module rows are judged by the import name. ``numpy.lib`` ends in
+    ``.lib``, and a source path can sit under a folder named ``examples``, so
+    the file rules must not see either of those. File rows are judged by the
+    destination path only.
+    """
     dest = str(entry[0])
-    src = str(entry[1] or "")
-    if excluded_module(dest):
-        return False
-    if excluded_bundle_dest(dest):
-        return False
-    return not src or not excluded_bundle_dest(src)
+    kind = str(entry[2]) if len(entry) > 2 else ""
+    if kind.upper() == "PYMODULE":
+        return not excluded_module(dest)
+    return not excluded_bundle_dest(dest)
 
 
 def _under(parts: list[str], package: str, markers: set[str]) -> bool:

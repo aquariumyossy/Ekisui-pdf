@@ -29,3 +29,4 @@ include = ["ekisui_pdf*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]

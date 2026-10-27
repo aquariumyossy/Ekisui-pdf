@@ -133,8 +133,12 @@ class VerifyResultDialog(QDialog):
         self.setWindowTitle("保存後の検証")
         self.resize(560, 420)
         layout = QVBoxLayout(self)
-        title = QLabel("合格" if result.report.passed else "残存あり")
-        title.setObjectName("pass" if result.report.passed else "fail")
+        if not result.report.checked_terms:
+            title = QLabel("確認する文字列なし")
+            title.setObjectName("fail")
+        else:
+            title = QLabel("合格" if result.report.passed else "残存あり")
+            title.setObjectName("pass" if result.report.passed else "fail")
         layout.addWidget(title)
         detail = QLabel(result.report.summary)
         detail.setWordWrap(True)
@@ -154,14 +158,19 @@ class VerifyResultDialog(QDialog):
         path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(path)
         listing = QListWidget()
-        if result.report.leftovers:
+        if not result.report.checked_terms:
+            listing.addItem("選択した文字列がないため、残存の確認はしていません。")
+        elif result.report.leftovers:
             for leftover in result.report.leftovers:
                 listing.addItem(leftover.describe())
         else:
-            listing.addItem("選んだ元の文字列は、テキストからもファイル内のUTF-8/UTF-16列からも見つかりませんでした。")
+            listing.addItem(
+                "選んだ元の文字列は、ページ外の文字、しおり、文書情報、注釈、ページラベル、"
+                "UTF-8 / UTF-16 とその16進表記からも見つかりませんでした。"
+            )
         layout.addWidget(listing)
         note = QLabel(
-            "検証は文字層とファイル中の文字列を見ます。画像の画素をもう一度OCRしてはいません。"
+            "検証は文字層と、しおりなどの文字列を見ます。画像の画素をもう一度OCRしてはいません。"
             "選んでいない出現や、OCRが読み落とした文字は残り得ます。"
         )
         note.setWordWrap(True)

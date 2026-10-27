@@ -26,24 +26,7 @@ def scanned_pdf(path: Path, pages: list[list[str]], color: tuple[float, float, f
                 )
                 y += 36
             pixmaps.append(page.get_pixmap(dpi=144, alpha=False))
-            text_dict = page.get_text("dict")
-            line_index = 0
-            for block in text_dict["blocks"]:
-                if block.get("type") != 0:
-                    continue
-                for line in block["lines"]:
-                    text = "".join(span["text"] for span in line["spans"])
-                    x0, y0, x1, y1 = line["bbox"]
-                    lines.append(
-                        OcrLine(
-                            page_index=page_index,
-                            text=text,
-                            rect=Rect(x0, y0, x1, y1),
-                            confidence=1.0,
-                            line_id=f"p{page_index}-l{line_index}",
-                        )
-                    )
-                    line_index += 1
+            lines.extend(_lines_from_text_page(page, page_index))
         image_doc = pymupdf.open()
         try:
             for pixmap in pixmaps:
@@ -54,4 +37,32 @@ def scanned_pdf(path: Path, pages: list[list[str]], color: tuple[float, float, f
             image_doc.close()
     finally:
         text_doc.close()
+    return lines
+
+
+def _lines_from_text_page(page: pymupdf.Page, page_index: int) -> list[OcrLine]:
+    lines: list[OcrLine] = []
+    raw = page.get_text("rawdict")
+    line_index = 0
+    for block in raw["blocks"]:
+        if block.get("type") != 0:
+            continue
+        for line in block["lines"]:
+            chars = [char for span in line["spans"] for char in span.get("chars") or []]
+            text = "".join(char["c"] for char in chars) or "".join(span["text"] for span in line["spans"])
+            x0, y0, x1, y1 = line["bbox"]
+            char_rects = ()
+            if chars and "".join(char["c"] for char in chars) == text:
+                char_rects = tuple(Rect(*char["bbox"]) for char in chars)
+            lines.append(
+                OcrLine(
+                    page_index=page_index,
+                    text=text,
+                    rect=Rect(x0, y0, x1, y1),
+                    confidence=1.0,
+                    line_id=f"p{page_index}-l{line_index}",
+                    char_rects=char_rects,
+                )
+            )
+            line_index += 1
     return lines

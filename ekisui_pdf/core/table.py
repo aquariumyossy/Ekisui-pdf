@@ -88,15 +88,24 @@ def load_table(path: Path) -> ReplacementTable:
     if path.suffix.lower() == ".csv":
         reader = csv.DictReader(io.StringIO(text))
         entries = [
-            ReplacementEntry(term=row.get("term", ""), pseudonym=row.get("pseudonym", ""))
+            ReplacementEntry(term=_as_text(row.get("term")), pseudonym=_as_text(row.get("pseudonym")))
             for row in reader
-            if (row.get("term") or "").strip()
+            if _as_text(row.get("term")).strip()
         ]
         return ReplacementTable(entries)
     payload = json.loads(text)
-    entries = [
-        ReplacementEntry(term=item.get("term", ""), pseudonym=item.get("pseudonym", ""))
-        for item in payload.get("entries", [])
-        if str(item.get("term", "")).strip()
-    ]
+    entries = []
+    for item in payload.get("entries", []):
+        if not isinstance(item, dict):
+            continue
+        term = _as_text(item.get("term")).strip()
+        if not term:
+            continue
+        entries.append(ReplacementEntry(term=term, pseudonym=_as_text(item.get("pseudonym"))))
     return ReplacementTable(entries)
+
+
+def _as_text(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value)

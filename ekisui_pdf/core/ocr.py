@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ekisui_pdf.core.errors import ModelNotFoundError
+from ekisui_pdf.core.geometry import expand_char_boxes, slice_rect
 from ekisui_pdf.core.models import OcrLine, Rect
 from ekisui_pdf.paths import models_dir
 
@@ -28,6 +29,7 @@ def create_engine(directory: Path | None = None):
     if not _is_local_file(det_path) or not _is_local_file(rec_path):
         raise ModelNotFoundError("OCRモデルはローカルファイルだけを使います。")
 
+    _disable_ort_telemetry()
     from rapidocr import EngineType, LangDet, LangRec, ModelType, OCRVersion, RapidOCR
 
     return RapidOCR(
@@ -51,28 +53,69 @@ def create_engine(directory: Path | None = None):
 def recognize_image(engine, image, *, page_index: int, zoom: float) -> list[OcrLine]:
     if not hasattr(image, "shape"):
         raise TypeError("OCRには画像配列だけを渡します。パスやURLは受け付けません。")
-    result = engine(image)
+    result = engine(image, return_word_box=True, return_single_char_box=True)
     texts = tuple(result.txts or ())
     scores = tuple(result.scores or ())
     boxes = result.boxes
     if boxes is None or not texts:
         return []
+    word_lines = tuple(result.word_results or ())
     lines: list[OcrLine] = []
     for index, (text, score, box) in enumerate(zip(texts, scores, boxes)):
         xs = [float(point[0]) for point in box]
         ys = [float(point[1]) for point in box]
         if zoom <= 0:
             raise ValueError("zoom は正の数です。")
+        rect = Rect(min(xs) / zoom, min(ys) / zoom, max(xs) / zoom, max(ys) / zoom)
+        words = word_lines[index] if index < len(word_lines) else None
         lines.append(
             OcrLine(
                 page_index=page_index,
                 text=str(text),
-                rect=Rect(min(xs) / zoom, min(ys) / zoom, max(xs) / zoom, max(ys) / zoom),
+                rect=rect,
                 confidence=float(score),
                 line_id=f"p{page_index}-l{index}",
+                char_rects=_char_rects(str(text), words, zoom, rect),
             )
         )
     return lines
+
+
+def _quad_rect(box, zoom: float) -> Rect:
+    xs = [float(point[0]) for point in box]
+    ys = [float(point[1]) for point in box]
+    return Rect(min(xs) / zoom, min(ys) / zoom, max(xs) / zoom, max(ys) / zoom)
+
+
+def _char_rects(text: str, words, zoom: float, line_rect: Rect) -> tuple[Rect, ...]:
+    if not text or not words:
+        return ()
+    pieces: list[Rect] = []
+    chars: list[str] = []
+    for item in words:
+        content, _score, box = item
+        content = str(content)
+        rect = _quad_rect(box, zoom)
+        if len(content) <= 1:
+            chars.append(content)
+            pieces.append(rect)
+            continue
+        for offset, char in enumerate(content):
+            chars.append(char)
+            pieces.append(slice_rect(rect, content, offset, offset + 1))
+    if "".join(chars) != text:
+        return ()
+    return expand_char_boxes(pieces, line_rect)
+
+
+def _disable_ort_telemetry() -> None:
+    try:
+        import onnxruntime
+    except Exception:
+        return
+    disable = getattr(onnxruntime, "disable_telemetry_events", None)
+    if disable is not None:
+        disable()
 
 
 def render_page_bgr(page, dpi: int = 200):

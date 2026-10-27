@@ -15,12 +15,12 @@ from tests.factories import scanned_pdf
 def _selection_for(line: OcrLine, term: str, action: Action, pseudonym: str = "") -> Selection:
     start = line.text.index(term)
     end = start + len(term)
-    from ekisui_pdf.core.geometry import slice_rect
+    from ekisui_pdf.core.geometry import span_rect
 
     return Selection(
         id=f"{line.line_id}-{start}",
         page_index=line.page_index,
-        rect=slice_rect(line.rect, line.text, start, end),
+        rect=span_rect(line, start, end),
         matched_text=term,
         action=action,
         pseudonym=pseudonym,
@@ -262,12 +262,191 @@ def _poisoned_pdf(path: Path) -> Path:
     return path
 
 
-def _assert_box_blackened(before: pymupdf.Pixmap, page: pymupdf.Page, rect: Rect) -> None:
-    after = page.get_pixmap(dpi=72, alpha=False)
-    x0 = max(int(rect.x0) + 1, 0)
-    y0 = max(int(rect.y0) + 1, 0)
-    x1 = min(int(rect.x1) - 1, after.width - 1)
-    y1 = min(int(rect.y1) - 1, after.height - 1)
+def test_proportional_glyphs_are_covered_by_char_boxes(tmp_path: Path):
+    """等幅分割は細い「Tel:」のぶんだけ漢字を右にずらす。文字矩形なら山の画素が黒くなる。"""
+    from ekisui_pdf.core.geometry import slice_rect
+
+    text = "Tel:山田太郎様"
+    text_doc = pymupdf.open()
+    page = text_doc.new_page(width=595, height=842)
+    font = pymupdf.Font("japan")
+    writer = pymupdf.TextWriter(page.rect)
+    writer.append((72, 120), text, font=font, fontsize=16)
+    writer.write_text(page, color=(0.75, 0.05, 0.05))
+    raw_chars = [
+        char
+        for block in page.get_text("rawdict")["blocks"]
+        if block.get("type") == 0
+        for line in block["lines"]
+        for span in line["spans"]
+        for char in span.get("chars") or []
+    ]
+    yama = next(char["bbox"] for char in raw_chars if char["c"] == "山")
+    line_bbox = next(
+        line["bbox"]
+        for block in page.get_text("rawdict")["blocks"]
+        if block.get("type") == 0
+        for line in block["lines"]
+    )
+    equal = slice_rect(Rect(*line_bbox), text, text.index("山"), text.index("山") + 1)
+    assert equal.x0 > yama[0] + 4
+
+    pixmap = page.get_pixmap(dpi=144, alpha=False)
+    image_doc = pymupdf.open()
+    image_page = image_doc.new_page(width=595, height=842)
+    image_page.insert_image(image_page.rect, pixmap=pixmap)
+    source_path = tmp_path / "proportional.pdf"
+    image_doc.save(source_path)
+    text_doc.close()
+    image_doc.close()
+
+    from ekisui_pdf.core.ocr import create_engine, recognize_image, render_page_bgr
+    from ekisui_pdf.paths import models_dir
+    from ekisui_pdf.core.ocr import DET_FILENAME
+
+    if not (models_dir() / DET_FILENAME).is_file():
+        pytest.skip("models が未取得")
+
+    source = pymupdf.open(source_path)
+    try:
+        image, zoom = render_page_bgr(source[0], dpi=200)
+        lines = recognize_image(create_engine(models_dir()), image, page_index=0, zoom=zoom)
+        target = next(line for line in lines if "山田太郎" in line.text)
+        assert len(target.char_rects) == len(target.text)
+        selection = _selection_for(target, "山田太郎", Action.REDACT)
+        before = source[0].get_pixmap(dpi=144, alpha=False)
+        dest = tmp_path / "proportional-redacted.pdf"
+        result = export_pdf(source, dest, lines, [selection], ReplacementTable(), SaveOptions())
+    finally:
+        source.close()
+    assert result.report.passed, result.report.leftovers
+    saved = pymupdf.open(dest)
+    try:
+        _assert_box_blackened(before, saved[0], Rect(*yama), dpi=144)
+        assert "山田太郎" not in (saved[0].get_text("text", clip=pymupdf.INFINITE_RECT()) or "")
+    finally:
+        saved.close()
+
+
+def test_outline_and_page_label_do_not_survive_strip(tmp_path: Path):
+    source_path, lines = _sample(tmp_path)
+    source = pymupdf.open(source_path)
+    source.set_toc([[1, "山田太郎事件", 1]])
+    source.set_page_labels([{"startpage": 0, "prefix": "山田太郎", "style": "D", "firstpagenum": 1}])
+    targets = [line for line in lines if "山田太郎" in line.text]
+    selections = [_selection_for(line, "山田太郎", Action.REDACT) for line in targets]
+    kept = tmp_path / "kept-outline.pdf"
+    stripped = tmp_path / "stripped-outline.pdf"
+    try:
+        kept_result = export_pdf(
+            source, kept, lines, selections, ReplacementTable(), SaveOptions(strip_metadata=False)
+        )
+        stripped_result = export_pdf(
+            source, stripped, lines, selections, ReplacementTable(), SaveOptions(strip_metadata=True)
+        )
+    finally:
+        source.close()
+    assert not kept_result.report.passed
+    assert any(item.where == "outline" for item in kept_result.report.leftovers)
+    assert any(item.where == "label" for item in kept_result.report.leftovers)
+    assert stripped_result.report.passed, stripped_result.report.leftovers
+    opened = pymupdf.open(stripped)
+    try:
+        assert opened.get_toc() == []
+        assert opened.get_page_labels() == []
+    finally:
+        opened.close()
+
+
+def test_thumbnail_is_removed_when_redacting(tmp_path: Path):
+    source_path, lines = _sample(tmp_path)
+    source = pymupdf.open(source_path)
+    _attach_thumbnail(source)
+    assert source.xref_get_key(source[0].xref, "Thumb")[0] != "null"
+    target = next(line for line in lines if "山田太郎" in line.text)
+    dest = tmp_path / "no-thumb.pdf"
+    try:
+        export_pdf(
+            source,
+            dest,
+            lines,
+            [_selection_for(target, "山田太郎", Action.REDACT)],
+            ReplacementTable(),
+            SaveOptions(strip_metadata=False),
+        )
+    finally:
+        source.close()
+    saved = pymupdf.open(dest)
+    try:
+        assert saved.xref_get_key(saved[0].xref, "Thumb")[0] == "null"
+    finally:
+        saved.close()
+
+
+def test_prior_hidden_text_is_not_copied_through(tmp_path: Path):
+    source_path, lines = _sample(tmp_path)
+    source = pymupdf.open(source_path)
+    source[0].insert_text((72, 400), "秘密の氏名", fontname="japan", fontsize=16, render_mode=3)
+    before = source[0].get_pixmap(dpi=72, alpha=False).samples
+    dest = tmp_path / "replaced-layer.pdf"
+    try:
+        export_pdf(source, dest, lines, [], ReplacementTable(), SaveOptions(strip_metadata=False))
+    finally:
+        source.close()
+    saved = pymupdf.open(dest)
+    try:
+        assert "秘密の氏名" not in (saved[0].get_text("text", clip=pymupdf.INFINITE_RECT()) or "")
+        assert saved[0].get_pixmap(dpi=72, alpha=False).samples == before
+    finally:
+        saved.close()
+
+
+def test_off_page_text_is_reported(tmp_path: Path):
+    document = pymupdf.open()
+    page = document.new_page(width=595, height=842)
+    font = pymupdf.Font("japan")
+    writer = pymupdf.TextWriter(page.rect)
+    writer.append((page.rect.width + 20, 100), "山田太郎", font=font, fontsize=16)
+    writer.write_text(page, render_mode=3)
+    path = tmp_path / "offpage.pdf"
+    document.save(path)
+    document.close()
+    from ekisui_pdf.core.verify import verify_pdf
+
+    report = verify_pdf(path, ["山田太郎"])
+    assert not report.passed
+    assert any(item.where == "text" for item in report.leftovers)
+
+
+def test_windows_case_difference_is_the_same_file(monkeypatch: pytest.MonkeyPatch):
+    from ekisui_pdf.core import pdfio
+
+    monkeypatch.setattr(pdfio.os, "name", "nt")
+    assert pdfio.paths_are_same(Path("C:/Docs/Case.pdf"), Path("C:/docs/case.PDF"))
+
+
+def _attach_thumbnail(document: pymupdf.Document) -> None:
+    page = document[0]
+    pixmap = page.get_pixmap(dpi=12, alpha=False)
+    xref = document.get_new_xref()
+    document.update_object(
+        xref,
+        "<</Type/XObject/Subtype/Image"
+        f"/Width {pixmap.width}/Height {pixmap.height}"
+        "/ColorSpace/DeviceRGB/BitsPerComponent 8"
+        f"/Length {len(pixmap.samples)}>>",
+    )
+    document.update_stream(xref, pixmap.samples)
+    document.xref_set_key(page.xref, "Thumb", f"{xref} 0 R")
+
+
+def _assert_box_blackened(before: pymupdf.Pixmap, page: pymupdf.Page, rect: Rect, dpi: int = 72) -> None:
+    after = page.get_pixmap(dpi=dpi, alpha=False)
+    scale = dpi / 72.0
+    x0 = max(int(rect.x0 * scale) + 1, 0)
+    y0 = max(int(rect.y0 * scale) + 1, 0)
+    x1 = min(int(rect.x1 * scale) - 1, after.width - 1)
+    y1 = min(int(rect.y1 * scale) - 1, after.height - 1)
     assert x1 > x0 and y1 > y0
     total = 0
     black = 0

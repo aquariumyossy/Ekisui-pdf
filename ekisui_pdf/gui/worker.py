@@ -10,8 +10,8 @@ class OcrWorker(QThread):
     recognized = Signal(int, object)
     failed = Signal(str)
 
-    def __init__(self, model_dir: Path) -> None:
-        super().__init__()
+    def __init__(self, model_dir: Path, parent=None) -> None:
+        super().__init__(parent)
         self.model_dir = model_dir
         self._queue: queue.Queue = queue.Queue()
 

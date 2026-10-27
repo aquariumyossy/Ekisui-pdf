@@ -82,6 +82,8 @@ class OcrLine:
     rect: Rect
     confidence: float = 1.0
     line_id: str = ""
+    # 文字数と同じ長さのときだけ使う。等幅で割った位置は漢字と英字の混在でずれる。
+    char_rects: tuple[Rect, ...] = ()
 
 
 @dataclass
@@ -132,8 +134,15 @@ class Leftover:
 
     def describe(self) -> str:
         place = "ファイル全体" if self.page_index < 0 else f"{self.page_index + 1}ページ"
-        kind = "テキスト" if self.where == "text" else "ファイル内のバイト列"
-        return f"{place}: 「{self.term}」（{kind}）"
+        kinds = {
+            "text": "テキスト",
+            "bytes": "ファイル内のバイト列",
+            "outline": "しおり",
+            "metadata": "文書情報",
+            "annot": "注釈",
+            "label": "ページラベル",
+        }
+        return f"{place}: 「{self.term}」（{kinds.get(self.where, self.where)}）"
 
 
 @dataclass(frozen=True)
@@ -145,7 +154,7 @@ class VerifyReport:
     @property
     def summary(self) -> str:
         if not self.checked_terms:
-            return "確認する対象の文字列がありません。墨消しや置換をしていない保存です。"
+            return "確認する文字列がありません。選択に文字が入っていないため、残存は調べていません。"
         if self.passed:
             return "合格。選んだ元の文字列は、保存したPDFのテキストから見つかりませんでした。"
         return f"残存あり。{len(self.leftovers)}件見つかりました。"

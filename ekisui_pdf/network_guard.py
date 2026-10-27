@@ -23,6 +23,7 @@ def install_network_guard() -> None:
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["HF_DATASETS_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    _disable_ort_telemetry()
 
     _ORIGINALS["connect"] = socket.socket.connect
     _ORIGINALS["connect_ex"] = socket.socket.connect_ex
@@ -58,6 +59,17 @@ def install_network_guard() -> None:
     except Exception:
         _ORIGINALS["request"] = None
     _INSTALLED = True
+
+
+def _disable_ort_telemetry() -> None:
+    """ONNX Runtime の TraceLogging を止める。文書の中身は送らない実装だが、接続自体を残さない。"""
+    try:
+        import onnxruntime
+    except Exception:
+        return
+    disable = getattr(onnxruntime, "disable_telemetry_events", None)
+    if disable is not None:
+        disable()
 
 
 def uninstall_network_guard() -> None:

@@ -29,9 +29,9 @@ from PySide6.QtWidgets import (
 )
 
 from ekisui_pdf.core.errors import EkisuiError
-from ekisui_pdf.core.geometry import char_indexes_in_rect, slice_rect, union_rect
+from ekisui_pdf.core.geometry import char_indexes_in_rect, span_rect, union_rect
 from ekisui_pdf.core.models import Action, OcrLine, Rect, ReplacementEntry, Selection
-from ekisui_pdf.core.pdfio import export_pdf, open_document, render_page_rgb
+from ekisui_pdf.core.pdfio import export_pdf, open_document, paths_are_same, render_page_rgb
 from ekisui_pdf.core.table import ReplacementTable, load_table, save_table
 from ekisui_pdf.core.variants import TextHit, find_variants, group_surfaces, search_phrase
 from ekisui_pdf.gui.dialogs import OcrProgressDialog, SaveOptionsDialog, VerifyResultDialog
@@ -248,11 +248,14 @@ class MainWindow(QMainWindow):
         self.lines = []
         self.selections = []
         self.variant_groups = []
+        had_table = bool(self.table.entries)
+        self.table = ReplacementTable()
         self.page_index = 0
         self._refresh_all()
-        self.statusBar().showMessage(
-            f"{path.name} を開きました。{document.page_count}ページ。OCRはまだです。"
-        )
+        message = f"{path.name} を開きました。{document.page_count}ページ。OCRはまだです。"
+        if had_table:
+            message += " 別事件の仮名が残らないよう、置換表は空にしました。"
+        self.statusBar().showMessage(message)
 
     def load_ocr_lines(self, lines: list[OcrLine]) -> None:
         self.lines = list(lines)
@@ -305,7 +308,7 @@ class MainWindow(QMainWindow):
             if not indexes:
                 continue
             start, end = indexes[0], indexes[-1] + 1
-            text_rect = slice_rect(line.rect, line.text, start, end)
+            text_rect = span_rect(line, start, end)
             created.append(
                 self._new_selection(
                     page_index=line.page_index,
@@ -572,7 +575,7 @@ class MainWindow(QMainWindow):
         self._ocr_next = 0
         self._ocr_done = False
         self._ocr_dialog = OcrProgressDialog(self.document.page_count, self)
-        self._worker = OcrWorker(models_dir())
+        self._worker = OcrWorker(models_dir(), self)
         self._worker.recognized.connect(self._on_ocr_page)
         self._worker.failed.connect(self._on_ocr_failed)
         self._worker.start()
@@ -645,8 +648,9 @@ class MainWindow(QMainWindow):
         self._worker = None
         if worker is None:
             return
-        worker.stop()
-        worker.wait(8000)
+        if worker.isRunning():
+            worker.stop()
+            worker.wait()
 
     def _suggested_pdf(self) -> Path:
         if self.source_path is None:
@@ -663,7 +667,7 @@ class MainWindow(QMainWindow):
         dest, options = dialog.values()
         if not str(dest).strip():
             return
-        if self.source_path.resolve() == dest.resolve():
+        if paths_are_same(self.source_path, dest):
             QMessageBox.warning(self, "保存", "元のファイルは上書きしません。別の名前で保存してください。")
             return
         if dest.exists():

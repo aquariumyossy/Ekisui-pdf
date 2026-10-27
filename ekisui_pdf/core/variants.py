@@ -3,7 +3,7 @@ from __future__ import annotations
 import unicodedata
 from dataclasses import dataclass
 
-from ekisui_pdf.core.geometry import slice_rect
+from ekisui_pdf.core.geometry import span_rect
 from ekisui_pdf.core.models import OcrLine, Rect
 
 # NFKC 後の表記。㈱ は NFKC で (株) になる。
@@ -88,7 +88,7 @@ def _hits_for_needle(lines: list[OcrLine], needle: str, *, expand_markers: bool)
                     line_id=line.line_id,
                     char_start=char_start,
                     char_end=char_end,
-                    rect=slice_rect(line.rect, line.text, char_start, char_end),
+                    rect=span_rect(line, char_start, char_end),
                 )
             )
             cursor = end

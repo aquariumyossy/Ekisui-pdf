@@ -46,7 +46,12 @@ def test_engine_is_constructed_from_local_files_only(tmp_path: Path, monkeypatch
             raise AssertionError("このテストでは推論しない")
 
     monkeypatch.setattr("rapidocr.RapidOCR", FakeEngine)
+    import onnxruntime
+
+    disabled = {"called": False}
+    monkeypatch.setattr(onnxruntime, "disable_telemetry_events", lambda: disabled.__setitem__("called", True))
     create_engine(tmp_path)
+    assert disabled["called"]
     params = captured["params"]
     assert params["Det.model_path"] == str(det)
     assert params["Rec.model_path"] == str(rec)

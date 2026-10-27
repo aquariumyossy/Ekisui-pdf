@@ -156,6 +156,18 @@ class Session:
         self._index = None
         self.suggest()
         for group in manual:
+            if group.origin == "region" and group.canonical == "（範囲）":
+                revived = self._add_group(
+                    group.category,
+                    group.canonical,
+                    [],
+                    origin=group.origin,
+                    action=group.action,
+                    pseudonym=group.pseudonym,
+                )
+                for tracked in group.hits:
+                    self._append_hits(revived, [tracked.hit], include_fuzzy=False, included=tracked.included)
+                continue
             hits = search_pages(self.index(), group.canonical, self.settings, self.table)
             revived = self._add_group(
                 group.category,
@@ -171,6 +183,86 @@ class Session:
                     continue
                 extra = search_pages(self.index(), old.hit.surface, self.settings, self.table)
                 self._append_hits(revived, extra, include_fuzzy=True, included=old.included)
+        self.confirmed = False
+
+    def rebind_after_ocr(self, previous: Document) -> None:
+        """Move selections onto a document whose scanned pages were just read.
+
+        Pages that were not rebuilt keep their boxes, including a dragged
+        rectangle on a text page. Text on a rebuilt page is searched again.
+        A dragged rectangle on a rebuilt page is moved with the image.
+        """
+        from ekisui.pdf.deskew import map_page_rect
+
+        old_pages = {page.index: page for page in previous.pages}
+        new_pages = {page.index: page for page in self.document.pages}
+        changed = {
+            index
+            for index, page in new_pages.items()
+            if _page_was_rebuilt(old_pages.get(index), page)
+        }
+        self._index = None
+        if not changed:
+            return
+        pending: list[tuple[TermGroup, list[TrackedHit]]] = []
+        kept: list[TermGroup] = []
+        remembered: list[tuple] = []
+        for group in self.groups:
+            stale = [hit for hit in group.hits if hit.hit.page_index in changed]
+            if group.origin == "auto" and stale:
+                remembered.append(
+                    (
+                        group.canonical,
+                        group.category,
+                        group.action,
+                        group.pseudonym,
+                        {strict_text(hit.hit.surface): hit.included for hit in stale},
+                    )
+                )
+            group.hits = [hit for hit in group.hits if hit.hit.page_index not in changed]
+            if group.origin == "auto":
+                if group.hits:
+                    kept.append(group)
+                continue
+            kept.append(group)
+            if stale:
+                pending.append((group, stale))
+        self.groups = kept
+        self.suggest()
+        for canonical, category, action, pseudonym, flags in remembered:
+            restored = self._group_for_canonical(canonical, category)
+            if restored is None:
+                continue
+            restored.action = action
+            if pseudonym:
+                restored.pseudonym = pseudonym
+            for hit in restored.hits:
+                flag = flags.get(strict_text(hit.hit.surface))
+                if flag is not None:
+                    hit.included = flag
+        for group, stale in pending:
+            if group.origin == "region":
+                for tracked in stale:
+                    old_page = old_pages.get(tracked.hit.page_index)
+                    new_page = new_pages.get(tracked.hit.page_index)
+                    if old_page is None or new_page is None:
+                        continue
+                    mapped = map_page_rect(old_page, new_page, tracked.hit.bbox)
+                    self._append_hits(
+                        group,
+                        [replace(tracked.hit, bbox=mapped, line_ids=())],
+                        include_fuzzy=False,
+                        included=tracked.included,
+                    )
+            if strict_text(group.canonical) and group.canonical != "（範囲）":
+                found = search_pages(self.index(), group.canonical, self.settings, self.table)
+                self._append_hits(group, found, include_fuzzy=group.origin != "region")
+                for tracked in stale:
+                    if strict_text(tracked.hit.surface) == strict_text(group.canonical):
+                        continue
+                    extra = search_pages(self.index(), tracked.hit.surface, self.settings, self.table)
+                    self._append_hits(group, extra, include_fuzzy=True, included=tracked.included)
+        self.groups = [group for group in self.groups if group.hits]
         self.confirmed = False
 
     def set_included(self, hit_id: str, included: bool) -> None:
@@ -381,3 +473,11 @@ def _same_place(left: Hit, right: Hit) -> bool:
     return left.page_index == right.page_index and left.bbox.intersects(right.bbox) and (
         abs(left.bbox.x0 - right.bbox.x0) < 1.5 and abs(left.bbox.y0 - right.bbox.y0) < 1.5
     )
+
+
+def _page_was_rebuilt(old: Page | None, new: Page) -> bool:
+    if old is None:
+        return True
+    if (new.image_path or None) != (old.image_path or None):
+        return True
+    return abs(new.width - old.width) > 0.5 or abs(new.height - old.height) > 0.5

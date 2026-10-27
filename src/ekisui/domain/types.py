@@ -190,6 +190,11 @@ class Page:
     skew: float = 0.0
     correction_label: str | None = None
     source_index: int = 0
+    # Quarter turn applied before the small skew. 180° from the line model is
+    # only in ``rotation``, and it happens after the skew.
+    quarter: int = 0
+    source_width: float = 0.0
+    source_height: float = 0.0
 
 
 @dataclass(frozen=True)

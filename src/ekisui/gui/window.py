@@ -470,9 +470,13 @@ class MainWindow(QMainWindow):
         else:
             kind = "混在PDF"
         self.kind_label.setText(f"{kind}・{len(pages)}ページ")
+        pending = any(page.kind == PageKind.SCANNED and not page.image_path for page in pages)
+        read = any(page.kind == PageKind.SCANNED and page.image_path for page in pages)
         if self.ocr_running:
             self.ocr_label.setText("OCR中")
-        elif any(page.lines and page.kind == PageKind.SCANNED for page in pages):
+        elif pending:
+            self.ocr_label.setText("未読取")
+        elif read:
             self.ocr_label.setText("OCR済み")
         elif any(page.lines for page in pages):
             self.ocr_label.setText("テキスト層あり")
@@ -892,8 +896,11 @@ class MainWindow(QMainWindow):
 
     def _ocr_done(self, document) -> None:
         if self.session:
+            previous = self.session.document
             self.session.document = document
-            self.session._index = None
+            # Text found before OCR is searched again. A dragged rectangle stays,
+            # moved through the same rotation as the scan.
+            self.session.rebind_after_ocr(previous)
             self._pixmap_cache.clear()
         self._ocr_idle()
         self.refresh()

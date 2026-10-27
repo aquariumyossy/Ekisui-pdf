@@ -36,6 +36,8 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: python -m pip install -e . pyinstaller
+      - name: Model hashes
+        run: python tools/verify_models.py
       - name: Bundle
         run: pyinstaller ekisui.spec
       - name: Inno Setup

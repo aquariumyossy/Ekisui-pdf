@@ -111,6 +111,155 @@ def rotate_bound(image: np.ndarray, angle: float) -> np.ndarray:
     )
 
 
+def map_page_rect(old, new, rect):
+    """Move a rectangle from one reading of a page onto the next.
+
+    Both readings are turns of the original PDF page: quarter turn, then skew,
+    then 180° when the line model flips the image. A second OCR run undoes the
+    previous turns before applying the new ones, so the box is not rotated twice.
+    """
+    from ekisui.domain.types import Rect
+
+    source = _undo_page_rect(old, rect)
+    mapped = _apply_page_rect(new, source, _source_size(old, new))
+    return mapped.clip(Rect(0.0, 0.0, max(new.width, 1.0), max(new.height, 1.0)))
+
+
+def _source_size(old, new) -> tuple[float, float]:
+    if getattr(new, "source_width", 0) and getattr(new, "source_height", 0):
+        return float(new.source_width), float(new.source_height)
+    if getattr(old, "source_width", 0) and getattr(old, "source_height", 0):
+        return float(old.source_width), float(old.source_height)
+    if not _has_turn(old):
+        return float(old.width), float(old.height)
+    return float(new.width), float(new.height)
+
+
+def _has_turn(page) -> bool:
+    extra = (page.rotation - page.quarter) % 360
+    return page.quarter % 360 != 0 or extra != 0 or abs(page.skew) >= 0.05
+
+
+def _corners(rect, scale: float) -> list[tuple[float, float]]:
+    return [
+        (rect.x0 * scale, rect.y0 * scale),
+        (rect.x1 * scale, rect.y0 * scale),
+        (rect.x0 * scale, rect.y1 * scale),
+        (rect.x1 * scale, rect.y1 * scale),
+    ]
+
+
+def _rect_from_pixels(points: list[tuple[float, float]], scale: float):
+    from ekisui.domain.types import Rect
+
+    xs = [point[0] / scale for point in points]
+    ys = [point[1] / scale for point in points]
+    return Rect(min(xs), min(ys), max(xs), max(ys))
+
+
+def _apply_page_rect(page, rect, source_size: tuple[float, float]):
+    scale = page.dpi / 72.0
+    if scale <= 0 or not _has_turn(page):
+        return rect
+    width = float(round(source_size[0] * scale))
+    height = float(round(source_size[1] * scale))
+    corners = _corners(rect, scale)
+    corners, width, height = _turn(corners, width, height, page.quarter)
+    corners, width, height = _skew_points(corners, width, height, page.skew)
+    extra = (page.rotation - page.quarter) % 360
+    if extra == 180:
+        corners, width, height = _turn(corners, width, height, 180)
+    return _rect_from_pixels(corners, scale)
+
+
+def _undo_page_rect(page, rect):
+    if not _has_turn(page):
+        return rect
+    source_w = float(page.source_width or page.width)
+    source_h = float(page.source_height or page.height)
+    scale = page.dpi / 72.0
+    if scale <= 0:
+        return rect
+    width = float(round(source_w * scale))
+    height = float(round(source_h * scale))
+    corners = _corners(rect, scale)
+    turned, width, height = _turn(list(corners), width, height, page.quarter)
+    skewed, bound_w, bound_h = _skew_points(turned, width, height, page.skew)
+    extra = (page.rotation - page.quarter) % 360
+    if extra == 180:
+        # The 180° turn uses the post-skew canvas. Undo it before the skew.
+        corners, _, _ = _turn(corners, bound_w, bound_h, 180)
+    if abs(page.skew) >= 0.05:
+        corners = _unskew_points(corners, width, height, page.skew)
+    corners = _unturn(corners, float(round(source_w * scale)), float(round(source_h * scale)), page.quarter)
+    del skewed
+    return _rect_from_pixels(corners, scale)
+
+
+def _turn(points: list[tuple[float, float]], width: float, height: float, quarter: int):
+    turns = (quarter // 90) % 4
+    if turns == 0:
+        return points, width, height
+    if turns == 1:
+        return [(y, width - x) for x, y in points], height, width
+    if turns == 2:
+        return [(width - x, height - y) for x, y in points], width, height
+    return [(height - y, x) for x, y in points], height, width
+
+
+def _unturn(points: list[tuple[float, float]], width: float, height: float, quarter: int):
+    """Inverse of ``_turn``. ``width`` and ``height`` are the size before the turn."""
+    turns = (quarter // 90) % 4
+    if turns == 0:
+        return points
+    if turns == 1:
+        return [(width - y, x) for x, y in points]
+    if turns == 2:
+        return [(width - x, height - y) for x, y in points]
+    return [(y, height - x) for x, y in points]
+
+
+def _unskew_points(points: list[tuple[float, float]], width: float, height: float, angle: float):
+    matrix, _bound_w, _bound_h = _skew_matrix(width, height, angle)
+    inverse = cv2.invertAffineTransform(matrix)
+    moved = []
+    for x, y in points:
+        moved.append(
+            (
+                inverse[0, 0] * x + inverse[0, 1] * y + inverse[0, 2],
+                inverse[1, 0] * x + inverse[1, 1] * y + inverse[1, 2],
+            )
+        )
+    return moved
+
+
+def _skew_matrix(width: float, height: float, angle: float):
+    center = (width / 2.0, height / 2.0)
+    matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+    cosine = abs(matrix[0, 0])
+    sine = abs(matrix[0, 1])
+    bound_w = float(int(height * sine + width * cosine))
+    bound_h = float(int(height * cosine + width * sine))
+    matrix[0, 2] += bound_w / 2.0 - center[0]
+    matrix[1, 2] += bound_h / 2.0 - center[1]
+    return matrix, bound_w, bound_h
+
+
+def _skew_points(points: list[tuple[float, float]], width: float, height: float, angle: float):
+    if abs(angle) < 0.05 or width < 1 or height < 1:
+        return points, width, height
+    matrix, bound_w, bound_h = _skew_matrix(width, height, angle)
+    moved = []
+    for x, y in points:
+        moved.append(
+            (
+                matrix[0, 0] * x + matrix[0, 1] * y + matrix[0, 2],
+                matrix[1, 0] * x + matrix[1, 1] * y + matrix[1, 2],
+            )
+        )
+    return moved, bound_w, bound_h
+
+
 def _binary(image: np.ndarray, max_width: int = 1200) -> np.ndarray:
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY) if image.ndim == 3 else image
     height, width = gray.shape

@@ -11,6 +11,7 @@ import pymupdf
 from ekisui.domain.session import TermGroup
 from ekisui.domain.tableio import groups_to_csv
 from ekisui.domain.types import Action, Document, Page, PageKind, Rect, SaveOptions, Settings, TextLine
+from ekisui.errors import EkisuiError
 
 
 @dataclass(frozen=True)
@@ -202,7 +203,10 @@ def write_log(path: Path, boxes: list[RedactionBox], include_original: bool) -> 
 
 
 def _add_page(output: pymupdf.Document, source: pymupdf.Document, page: Page) -> pymupdf.Page:
-    if page.kind == PageKind.SCANNED and page.image_path:
+    if page.kind == PageKind.SCANNED:
+        if not page.image_path:
+            raise EkisuiError("スキャンのページが残っています。OCR実行してから保存してください。")
+        # A new page, so a printer's old invisible text is not copied across.
         pdf_page = output.new_page(width=page.width, height=page.height)
         pdf_page.insert_image(pdf_page.rect, filename=page.image_path)
         _write_text_layer(pdf_page, page.lines)

@@ -26,9 +26,13 @@ def main() -> int:
             print(f"missing {path}", file=sys.stderr)
             bad = True
             continue
-        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        data = path.read_bytes()
+        actual = hashlib.sha256(data).hexdigest()
         if actual != digest:
-            print(f"hash mismatch {name}", file=sys.stderr)
+            extra = ""
+            if name.endswith(".txt") and b"\r\n" in data:
+                extra = "（改行が CRLF です。このファイルは LF のままにしてください）"
+            print(f"hash mismatch {name}{extra}", file=sys.stderr)
             bad = True
         else:
             print(f"ok {name}")

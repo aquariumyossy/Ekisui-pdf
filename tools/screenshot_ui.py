@@ -13,8 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 import pymupdf  # noqa: E402
-from PySide6.QtGui import QFont, QFontDatabase  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtCore import QPoint, Qt  # noqa: E402
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPen  # noqa: E402
+from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
 
 from ekisui.domain.types import TextLine, TextSource  # noqa: E402
 from ekisui.gui.theme import QSS  # noqa: E402
@@ -90,7 +91,7 @@ def main() -> None:
     grab(window, out / "01-empty.png")
 
     window.open_path(str(demo))
-    window.session.suggest()
+    window.start_mask()
     page = window.session.document.pages[0]
     flagged = []
     for index, line in enumerate(page.lines):
@@ -105,6 +106,9 @@ def main() -> None:
     window._fit_width()
     QApplication.processEvents()
     grab(window, out / "03-candidates.png")
+    toolbar = window.grab().copy(0, 0, window.width(), 72)
+    toolbar.save(str(out / "10-toolbar.png"))
+    print("10-toolbar.png", toolbar.width(), toolbar.height())
 
     window.btn_ocr_menu.setChecked(True)
     window._toggle_ocr_pop()
@@ -136,12 +140,71 @@ def main() -> None:
     grab(window, out / "05-ocr-fix.png")
     window.canvas.cancel_edit()
 
+    window._set_zoom(2.4)
+    QApplication.processEvents()
+    edge = max(window.session.document.pages[0].lines, key=lambda item: item.bbox.x1)
+    window.canvas.lines = list(window.session.document.pages[0].lines)
+    line_end = window.canvas._origin.x() + edge.bbox.x1 * window.canvas.zoom
+    view_width = window.view.viewport().width()
+    window.view.horizontalScrollBar().setValue(max(0, int(line_end - view_width + 70)))
+    window.canvas.begin_edit(edge)
+    QApplication.processEvents()
+    grab(window, out / "11-editor-edge.png")
+    window.canvas.cancel_edit()
+    window._fit_width()
+
+    window._show_tab(0)
+    window.tab_group.buttons()[0].setChecked(True)
+    chosen = next(hit for group in window.session.groups for hit in group.hits if hit.included)
+    window._set_zoom(2.0)
+    QApplication.processEvents()
+    box = chosen.hit.bbox
+    center_x = window.canvas._origin.x() + (box.x0 + box.x1) / 2 * window.canvas.zoom
+    center_y = window.canvas._origin.y() + (box.y0 + box.y1) / 2 * window.canvas.zoom
+    window.view.horizontalScrollBar().setValue(max(0, int(center_x - window.view.viewport().width() / 2)))
+    window.view.verticalScrollBar().setValue(max(0, int(center_y - window.view.viewport().height() / 2)))
+    window._select_hit(chosen.id)
+    QApplication.processEvents()
+    full = window.grab()
+    full.save(str(out / "12-handles.png"))
+    print("12-handles.png", full.width(), full.height())
+
+    window.split.setSizes([760, 480])
+    QApplication.processEvents()
+    grab(window, out / "13-splitter.png")
+    window.split.setSizes([900, 384])
+
+    window._open_settings()
+    QApplication.processEvents()
+    info = next(button for button in window.shade.findChildren(QPushButton) if button.objectName() == "info")
+    shot = window.grab()
+    anchor = info.mapTo(window, QPoint(0, info.height() + 6))
+    painter = QPainter(shot)
+    painter.setPen(QPen(QColor("#1b1b1b")))
+    painter.setBrush(QColor("#fffef6"))
+    text = info.toolTip()
+    rect_width = 460
+    rect_height = 72
+    painter.drawRoundedRect(anchor.x(), anchor.y(), rect_width, rect_height, 6, 6)
+    painter.drawText(
+        anchor.x() + 10,
+        anchor.y() + 8,
+        rect_width - 20,
+        rect_height - 16,
+        int(Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap),
+        text,
+    )
+    painter.end()
+    shot.save(str(out / "14-settings-info.png"))
+    print("14-settings-info.png", shot.width(), shot.height())
+    window.shade.hide()
+
     window._show_tab(0)
     window.tab_group.buttons()[0].setChecked(True)
     window._open_confirm()
     QApplication.processEvents()
     grab(window, out / "06-confirm.png")
-    window.shade.hide()
+    window._confirm()
 
     window._open_save()
     QApplication.processEvents()

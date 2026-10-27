@@ -47,7 +47,7 @@ DEFAULT_ACTION = {
     Category.EMAIL: Action.BLACKOUT,
     Category.ACCOUNT: Action.BLACKOUT,
     Category.POSTAL: Action.BLACKOUT,
-    Category.ADDRESS: Action.BLACKOUT,
+    Category.ADDRESS: Action.REPLACE,
     Category.ALNUM: Action.BLACKOUT,
 }
 
@@ -219,6 +219,8 @@ class Hit:
     explanation: str
     line_ids: tuple[str, ...]
     ocr_like: bool = False
+    # False for an address that does not look like a place. The row stays off.
+    checked: bool = True
 
 
 @dataclass(frozen=True)
@@ -250,3 +252,6 @@ class Span:
     bbox: Rect
     line_ids: tuple[str, ...]
     category: Category
+    checked: bool = True
+    # None keeps the category default. Public-body addresses override it to blackout.
+    action: Action | None = None

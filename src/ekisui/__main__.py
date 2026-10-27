@@ -13,6 +13,12 @@ def main() -> int:
     from ekisui.netguard import install
 
     install()
+    if len(sys.argv) > 1 and sys.argv[1] == "--smoke":
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from ekisui.smoke import run
+
+        dest = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("smoke-out")
+        return run(dest)
     from PySide6.QtGui import QFont, QFontDatabase
     from PySide6.QtWidgets import QApplication
 

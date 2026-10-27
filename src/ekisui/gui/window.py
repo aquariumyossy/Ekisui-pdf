@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pymupdf
-from PySide6.QtCore import QSettings, Qt, QThread, Signal
+from PySide6.QtCore import QPoint, QPointF, QSettings, Qt, QThread, Signal
 from PySide6.QtGui import QFont, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -24,7 +24,9 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSlider,
     QSpinBox,
+    QSplitter,
     QStatusBar,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -44,9 +46,10 @@ from ekisui.domain.types import (
 )
 from ekisui.errors import EkisuiError
 from ekisui.gui.pageview import PageCanvas, PageView
+from ekisui.gui.zoom import anchored_scroll
 from ekisui.gui.panels import CandidatePanel, OcrPanel, TablePanel
-from ekisui.pdf.document import open_document, recognize
-from ekisui.pdf.export import export_pdf, redaction_boxes
+from ekisui.pdf.document import open_document, pages_need_ocr, recognize
+from ekisui.pdf.export import export_pdf, redaction_boxes, unique_destination
 from ekisui.pdf.ocr_engine import PpOcrV5
 from ekisui.pdf.verify import VerifyReport, verify_pdf
 
@@ -101,6 +104,9 @@ class MainWindow(QMainWindow):
         self.show_lines = False
         self.selected_hit = ""
         self.ocr_running = False
+        self.ocr_ran = False
+        self._after_ocr = ""
+        self._save_mode = "ocr"
         self.worker: OcrWorker | None = None
         self.cancel_event: threading.Event | None = None
         self.work_dir = Path(tempfile.mkdtemp(prefix="ekisui-"))
@@ -140,12 +146,16 @@ class MainWindow(QMainWindow):
         self.canvas.regionChosen.connect(self._on_region)
         self.canvas.lineActivated.connect(self._edit_line)
         self.canvas.editConfirmed.connect(self._commit_line)
+        self.canvas.hitAdjusted.connect(self._on_adjust)
+        self.canvas.hitRestore.connect(self._on_restore)
+        self.canvas.hitSelected.connect(self._select_hit)
         self.view = PageView(self.canvas)
+        self.view.zoomRequested.connect(self._zoom_at)
         viewer_box.addWidget(self.view, 1)
-        body.addWidget(viewer, 1)
         self.side = QWidget()
         self.side.setObjectName("side")
-        self.side.setFixedWidth(384)
+        self.side.setMinimumWidth(320)
+        self.side.setMaximumWidth(680)
         side_box = QVBoxLayout(self.side)
         side_box.setContentsMargins(0, 0, 0, 0)
         side_box.setSpacing(0)
@@ -175,7 +185,33 @@ class MainWindow(QMainWindow):
         self._wire_panels()
         self.table.hide()
         self.ocr_panel.hide()
-        body.addWidget(self.side)
+        foot = QWidget()
+        foot_box = QHBoxLayout(foot)
+        foot_box.setContentsMargins(10, 4, 10, 8)
+        self.btn_confirm = QPushButton("確定…")
+        _mark(self.btn_confirm, "primary")
+        self.btn_confirm.setToolTip("選んだ箇所のマスキングを確定します。画像と文字を消す処理です。")
+        self.btn_confirm.clicked.connect(self._open_confirm)
+        foot_box.addStretch(1)
+        foot_box.addWidget(self.btn_confirm)
+        side_box.addWidget(foot)
+        viewer.setMinimumWidth(360)
+        self.split = QSplitter(Qt.Orientation.Horizontal)
+        self.split.setObjectName("split")
+        self.split.setChildrenCollapsible(False)
+        self.split.setHandleWidth(8)
+        self.split.addWidget(viewer)
+        self.split.addWidget(self.side)
+        self.split.setStretchFactor(0, 1)
+        self.split.setStretchFactor(1, 0)
+        side_width = int(self.store.value("side_width", 384) or 384)
+        side_width = max(320, min(680, side_width))
+        self.split.setSizes([900, side_width])
+        self.split.splitterMoved.connect(self._on_split)
+        handle = self.split.handle(1)
+        handle.setToolTip("左右にドラッグして、ページと一覧の幅を変えられます。")
+        handle.setCursor(Qt.CursorShape.SplitHCursor)
+        body.addWidget(self.split, 1)
         self.empty = self._empty_state()
         root.addWidget(self.empty, 1)
         root.addWidget(self.body, 1)
@@ -196,44 +232,49 @@ class MainWindow(QMainWindow):
         bar.setFixedHeight(64)
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(8, 4, 8, 4)
-        self.btn_open = self._tool("開く", "PDFを開く（Ctrl+O）", self._pick_pdf, primary=True)
-        self.btn_ocr = self._tool("OCR実行", "全ページの文字を読み取り、透明テキストを重ねます", self.start_ocr)
+        self.btn_open = self._tool("開く", "PDFを開きます。（Ctrl+O）", self._pick_pdf, primary=True)
+        self.btn_ocr = self._tool(
+            "OCR実行",
+            "スキャン画像の文字を読み取り、検索できるPDFにします。マスキングはしません。",
+            self.start_ocr,
+        )
         self.btn_ocr_menu = QPushButton("▾")
         _mark(self.btn_ocr_menu, "dd")
-        self.btn_ocr_menu.setToolTip("OCRの設定")
+        self.btn_ocr_menu.setToolTip("読み取り前の傾き補正を切り替えます。")
         self.btn_ocr_menu.setCheckable(True)
         self.btn_ocr_menu.clicked.connect(self._toggle_ocr_pop)
-        self.btn_region = self._tool("範囲で選ぶ", "ページ上をドラッグして範囲を選びます", self._toggle_region)
-        self.btn_region.setCheckable(True)
-        self.btn_find = self._tool("語句で探す", "語句を全ページから探します\n空白・改行・全角半角・読み違えやすい字を無視", self._focus_find)
-        self.btn_auto = self._tool(
-            "自動候補",
-            "電話番号・メール・口座番号・郵便番号・住所・\n英数字・人名を候補に挙げます（確定は手動）",
-            self._auto,
+        self.btn_mask = self._tool(
+            "マスキング実行",
+            "個人情報などのマスキング候補を自動で探し、右の一覧に出します。",
+            self.start_mask,
         )
-        self.btn_fix = self._tool("確定", "選んだ箇所の画像と透明テキストを削除します", self._open_confirm)
-        self.btn_save = self._tool("保存", "別名で保存（Ctrl+Shift+S）", self._open_save)
+        self.btn_region = self._tool(
+            "範囲で選ぶ",
+            "ページ上をドラッグして、マスキングする範囲を選べます。",
+            self._toggle_region,
+        )
+        self.btn_region.setCheckable(True)
+        self.btn_save = self._tool("保存", "別名で保存します。（Ctrl+Shift+S）", self._open_save)
+        self.btn_save.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, True)
         layout.addWidget(self.btn_open)
         layout.addWidget(self.btn_ocr)
         layout.addWidget(self.btn_ocr_menu)
+        layout.addWidget(self.btn_mask)
         layout.addWidget(self.btn_region)
-        layout.addWidget(self.btn_find)
-        layout.addWidget(self.btn_auto)
-        layout.addWidget(self.btn_fix)
         layout.addWidget(self.btn_save)
         layout.addStretch(1)
         offline = QLabel("オフライン")
         offline.setObjectName("offline")
-        offline.setToolTip("外部への通信は一切行いません")
+        offline.setToolTip("外部とは通信しません。読み取りもマスキングもこのPCの中で行います。")
         layout.addWidget(offline)
-        settings = self._tool("設定", "設定", self._open_settings)
+        settings = self._tool("設定", "一致の厳しさや、マスキング枠の幅を変えます。", self._open_settings)
         layout.addWidget(settings)
         self.ocr_pop = QFrame(self.centralWidget())
         self.ocr_pop.setObjectName("pop")
         self.ocr_pop.setFixedSize(320, 78)
         pop_layout = QHBoxLayout(self.ocr_pop)
         label = QLabel("自動傾き補正")
-        label.setToolTip("OCRの前にページの向き（90°・180°・270°）と\n小さな傾きを自動で直します\n保存するPDFも直したページ画像になります")
+        label.setToolTip("読み取りの前に、ページの向きと小さな傾きを直します。保存するPDFも直した画像になります。")
         self.deskew_box = QCheckBox()
         self.deskew_box.setChecked(True)
         self.deskew_box.setToolTip(label.toolTip())
@@ -259,30 +300,30 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(8, 0, 8, 0)
         prev_b = QPushButton("＜")
         _mark(prev_b, "ib")
-        prev_b.setToolTip("前のページ（PageUp）")
+        prev_b.setToolTip("前のページを表示します。（PageUp）")
         prev_b.clicked.connect(lambda: self._move_page(-1))
         next_b = QPushButton("＞")
         _mark(next_b, "ib")
-        next_b.setToolTip("次のページ（PageDown）")
+        next_b.setToolTip("次のページを表示します。（PageDown）")
         next_b.clicked.connect(lambda: self._move_page(1))
         self.page_label = QLabel("1 / 1")
         out = QPushButton("−")
         _mark(out, "ib")
-        out.setToolTip("縮小（Ctrl+−）")
+        out.setToolTip("ページを縮小します。（Ctrl+−）")
         out.clicked.connect(lambda: self._set_zoom(self.zoom / 1.15))
         self.zoom_label = QLabel("100%")
         inn = QPushButton("＋")
         _mark(inn, "ib")
-        inn.setToolTip("拡大（Ctrl+＋）")
+        inn.setToolTip("ページを拡大します。（Ctrl+＋）")
         inn.clicked.connect(lambda: self._set_zoom(self.zoom * 1.15))
         fit = QPushButton("幅")
         _mark(fit, "ib")
-        fit.setToolTip("幅に合わせる")
+        fit.setToolTip("ページの幅を、表示領域に合わせます。")
         fit.clicked.connect(self._fit_width)
         self.line_toggle = QPushButton("文字枠")
         _mark(self.line_toggle, "ib")
         self.line_toggle.setCheckable(True)
-        self.line_toggle.setToolTip("読み取った文字の枠を表示")
+        self.line_toggle.setToolTip("読み取った文字の枠を表示します。赤い枠は要確認です。")
         self.line_toggle.toggled.connect(self._toggle_lines)
         layout.addWidget(prev_b)
         layout.addWidget(self.page_label)
@@ -310,7 +351,7 @@ class MainWindow(QMainWindow):
         caption.setStyleSheet("font-size: 16px; color: #5c5c5c;")
         button = QPushButton("PDFを開く")
         _mark(button, "primary")
-        button.setToolTip("Ctrl+O")
+        button.setToolTip("PDFを開きます。（Ctrl+O）")
         button.clicked.connect(self._pick_pdf)
         inner.addWidget(caption, alignment=Qt.AlignmentFlag.AlignCenter)
         inner.addWidget(button, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -342,7 +383,7 @@ class MainWindow(QMainWindow):
         self.card_body.setWordWrap(True)
         stop = QPushButton("中止")
         _mark(stop, "btn")
-        stop.setToolTip("読み取り済みのページは残ります")
+        stop.setToolTip("読み取りを中止します。ここまで読んだページは残ります。")
         stop.clicked.connect(self._cancel_ocr)
         card_box.addWidget(self.card_title)
         card_box.addWidget(self.card_body)
@@ -351,6 +392,7 @@ class MainWindow(QMainWindow):
 
     def _shortcuts(self) -> None:
         QShortcut(QKeySequence("Ctrl+O"), self, self._pick_pdf)
+        QShortcut(QKeySequence("Ctrl+F"), self, self._focus_find)
         QShortcut(QKeySequence("Ctrl+Shift+S"), self, self._open_save)
         QShortcut(QKeySequence("PgDown"), self, lambda: self._move_page(1))
         QShortcut(QKeySequence("PgUp"), self, lambda: self._move_page(-1))
@@ -364,7 +406,6 @@ class MainWindow(QMainWindow):
         self.candidates.pseudonymEdited.connect(self._set_name)
         self.candidates.activated.connect(self._activate_hit)
         self.candidates.excludeRequested.connect(self._exclude)
-        self.candidates.confirmRequested.connect(self._open_confirm)
         self.candidates.selectAll.connect(lambda _v: self._fill_candidates())
         self.table.includeVariant.connect(lambda hit_id: self._toggle_hit(hit_id, True))
         self.table.removeVariant.connect(lambda hit_id: self._toggle_hit(hit_id, False))
@@ -409,6 +450,8 @@ class MainWindow(QMainWindow):
         self.session = Session(document, self.settings)
         self.page_index = 0
         self.preview = False
+        self.ocr_ran = False
+        self._after_ocr = ""
         self.selected_hit = ""
         self.live_labels = {}
         self._pixmap_cache.clear()
@@ -423,8 +466,11 @@ class MainWindow(QMainWindow):
         ready = self.session is not None and not self.ocr_running
         self.empty.setVisible(self.session is None)
         self.body.setVisible(self.session is not None)
-        for button in (self.btn_ocr, self.btn_ocr_menu, self.btn_region, self.btn_find, self.btn_auto, self.btn_fix, self.btn_save):
+        for button in (self.btn_ocr, self.btn_ocr_menu, self.btn_region, self.btn_mask):
             button.setEnabled(ready)
+        self.btn_save.setEnabled(ready and self._can_save())
+        self.btn_save.setToolTip(self._save_tip())
+        self.btn_confirm.setEnabled(ready)
         self.btn_open.setEnabled(not self.ocr_running)
         self.side.setVisible(self.session is not None and not self.ocr_running)
         self._fill_recent()
@@ -556,6 +602,7 @@ class MainWindow(QMainWindow):
                         "id": tracked.id,
                         "bbox": tracked.hit.bbox,
                         "kind": tracked.hit.kind,
+                        "adjusted": tracked.adjusted,
                     }
                 )
         boxes = redaction_boxes(
@@ -611,15 +658,22 @@ class MainWindow(QMainWindow):
             for tracked in group.hits:
                 kind = tracked.hit.kind
                 label = "完全一致" if kind == MatchKind.EXACT else f"ゆるい一致（{round(tracked.hit.score * 100)}%）"
+                if tracked.hit.explanation:
+                    tip = f"ゆるい一致です。{tracked.hit.explanation}。"
+                elif kind == MatchKind.EXACT:
+                    tip = "この箇所をマスキングまたは置換の対象にします。"
+                else:
+                    tip = "ゆるい一致です。読み取りのゆれを確認してください。"
                 rows.append(
                     {
                         "hit_id": tracked.id,
                         "group_id": group.id,
                         "surface": tracked.hit.surface,
                         "included": tracked.included,
+                        "adjusted": tracked.adjusted,
                         "kind": kind,
                         "label": label,
-                        "tip": tracked.hit.explanation or label,
+                        "tip": tip,
                         "action": group.action,
                         "pseudonym": group.pseudonym,
                         "page": tracked.hit.page_index,
@@ -644,7 +698,14 @@ class MainWindow(QMainWindow):
                 )
                 slot["ids"].append(tracked.id)
                 slot["included"] = slot["included"] or tracked.included
-            section = "会社" if group.category == Category.COMPANY else "個人" if group.category == Category.PERSON else CATEGORY_LABEL[group.category]
+            if group.category == Category.COMPANY:
+                section = "会社"
+            elif group.category == Category.PERSON:
+                section = "個人"
+            elif group.category == Category.ADDRESS:
+                section = "住所"
+            else:
+                section = CATEGORY_LABEL[group.category]
             groups.append(
                 {
                     "id": group.id,
@@ -718,13 +779,86 @@ class MainWindow(QMainWindow):
         self.ocr_pop.setVisible(self.btn_ocr_menu.isChecked())
         self.ocr_pop.raise_()
 
-    def _auto(self) -> None:
+    def start_mask(self) -> None:
+        """Extract candidates. Scanned pages are read first. A second press re-scans."""
+        if not self.session or self.ocr_running:
+            return
+        if pages_need_ocr(self.session.document):
+            self._after_ocr = "mask"
+            self.start_ocr()
+            return
+        self._apply_mask()
+
+    def _apply_mask(self) -> None:
         if not self.session:
             return
-        self.session.suggest()
+        self.session.rescan()
         self.preview = False
         self._show_tab(0)
+        if self.tab_group.buttons():
+            self.tab_group.buttons()[0].setChecked(True)
         self.refresh()
+
+    def _can_save(self) -> bool:
+        if self.session is None or self.ocr_running:
+            return False
+        if self.session.confirmed or self.ocr_ran:
+            return True
+        return bool(self.session.groups)
+
+    def _save_tip(self) -> str:
+        if self.session is None or not self._can_save():
+            return "読み取りもマスキングの確定もまだないので、保存できません。"
+        if self.session.confirmed:
+            return "マスキングしたPDFを別名で保存します。消し残りも確認します。"
+        if self.session.groups:
+            return "候補が未確定です。読み取ったPDFだけ保存するか、確定に進むかを選べます。"
+        return "読み取った文字だけのPDFを別名で保存します。マスキングはしません。"
+
+    def _on_split(self, _pos: int, _index: int) -> None:
+        sizes = self.split.sizes()
+        if len(sizes) == 2 and sizes[1] >= 320:
+            self.store.setValue("side_width", sizes[1])
+        if self.fit_mode and self.session and not self.ocr_running:
+            self._fit_width()
+        self.canvas.reposition_edit()
+
+    def _on_adjust(self, hit_id: str, edge: str, page_x: float) -> None:
+        if not self.session:
+            return
+        self.session.adjust_hit(hit_id, edge, page_x)
+        self._sync_hit(hit_id)
+        self._fill_candidates()
+        self._fill_table()
+
+    def _on_restore(self, hit_id: str) -> None:
+        if not self.session:
+            return
+        self.session.restore_hit(hit_id)
+        self._sync_hit(hit_id)
+        self._fill_candidates()
+        self._fill_table()
+
+    def _sync_hit(self, hit_id: str) -> None:
+        if not self.session:
+            return
+        for group in self.session.groups:
+            for tracked in group.hits:
+                if tracked.id != hit_id:
+                    continue
+                for hit in self.canvas.hits:
+                    if hit["id"] == hit_id:
+                        hit["bbox"] = tracked.hit.bbox
+                        hit["adjusted"] = tracked.adjusted
+                self.selected_hit = hit_id
+                self.canvas.selected_hit = hit_id
+                self.canvas.update()
+                return
+
+    def _select_hit(self, hit_id: str) -> None:
+        self.selected_hit = hit_id
+        self.canvas.selected_hit = hit_id
+        self.canvas.update()
 
     def _search(self, text: str) -> None:
         if not self.session:
@@ -853,17 +987,67 @@ class MainWindow(QMainWindow):
     def _set_zoom(self, zoom: float) -> None:
         self.fit_mode = False
         self.zoom = max(0.3, min(zoom, 3.0))
-        if self.session:
-            self._show_page()
+        self._apply_zoom(rerender=True)
 
     def _fit_width(self) -> None:
         if not self.session:
             return
         page = self.session.document.pages[self.page_index]
         width = max(200, self.view.viewport().width() - 48)
-        self.zoom = width / max(page.width, 1)
+        self.zoom = max(0.3, min(width / max(page.width, 1), 3.0))
         self.fit_mode = True
-        self._show_page()
+        self._apply_zoom(rerender=False)
+
+    def _apply_zoom(self, rerender: bool) -> None:
+        self.zoom_label.setText(f"{round(self.zoom * 100)}%")
+        if not self.session:
+            return
+        self.canvas.set_zoom(self.zoom)
+        if rerender:
+            self._rerender_current()
+
+    def _zoom_at(self, factor: float, pos: QPointF, rerender: bool) -> None:
+        if not self.session or factor <= 0:
+            return
+        old = self.zoom
+        horizontal = self.view.horizontalScrollBar()
+        vertical = self.view.verticalScrollBar()
+        new, scroll_x, scroll_y = anchored_scroll(
+            old,
+            old * factor,
+            pos.x(),
+            pos.y(),
+            float(self.canvas._origin.x()),
+            float(self.canvas._origin.y()),
+            float(horizontal.value()),
+            float(vertical.value()),
+        )
+        if abs(new - old) < 1e-4:
+            if rerender:
+                self._rerender_current()
+            return
+        self.fit_mode = False
+        self.zoom = new
+        self.zoom_label.setText(f"{round(new * 100)}%")
+        self.canvas.set_zoom(new)
+        horizontal.setValue(int(round(scroll_x)))
+        vertical.setValue(int(round(scroll_y)))
+        if rerender:
+            self._rerender_current()
+
+    def _rerender_current(self) -> None:
+        if not self.session:
+            return
+        index = self.page_index
+        self._pixmap_cache = {key: value for key, value in self._pixmap_cache.items() if not (key and key[1] == index)}
+        page = self.session.document.pages[index]
+        dpi = max(72, min(216, int(round(72 * self.zoom))))
+        if page.image_path and Path(page.image_path).exists():
+            pixmap = QPixmap(page.image_path)
+        else:
+            pixmap = _render_pdf(self.session.document.source_path, page.source_index, dpi)
+        self.canvas.pixmap = pixmap
+        self.canvas.update()
 
     def start_ocr(self) -> None:
         if not self.session or self.worker is not None:
@@ -895,17 +1079,26 @@ class MainWindow(QMainWindow):
         self.card_body.setText("中止しています")
 
     def _ocr_done(self, document) -> None:
+        mask = self._after_ocr == "mask"
+        self._after_ocr = ""
         if self.session:
             previous = self.session.document
             self.session.document = document
-            # Text found before OCR is searched again. A dragged rectangle stays,
-            # moved through the same rotation as the scan.
+            # Manual ranges move with the scan. Candidates are not created here.
             self.session.rebind_after_ocr(previous)
             self._pixmap_cache.clear()
+            self.ocr_ran = True
         self._ocr_idle()
+        if mask and self.session:
+            self.session.rescan()
+            self.preview = False
+            self._show_tab(0)
+            if self.tab_group.buttons():
+                self.tab_group.buttons()[0].setChecked(True)
         self.refresh()
 
     def _ocr_failed(self, message: str) -> None:
+        self._after_ocr = ""
         self._ocr_idle()
         QMessageBox.warning(self, "ekisui-pdf", message)
         self.refresh()
@@ -946,7 +1139,7 @@ class MainWindow(QMainWindow):
         cancel.clicked.connect(self.shade.hide)
         go = QPushButton("確定する")
         _mark(go, "danger")
-        go.setToolTip("元のPDFは変更しません\n保存時に別名のファイルを作ります")
+        go.setToolTip("選んだ箇所の確定に進みます。元のPDFは変更しません。")
         go.clicked.connect(self._confirm)
         buttons.addStretch(1)
         buttons.addWidget(cancel)
@@ -971,32 +1164,78 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _open_save(self) -> None:
-        if not self.session or self.ocr_running:
+        if not self.session or self.ocr_running or not self._can_save():
             return
-        source = Path(self.session.document.source_path)
-        default = str(source.with_name(source.stem + "_墨消し.pdf"))
+        if self.session.groups and not self.session.confirmed:
+            self._ask_unconfirmed_save()
+            return
+        self._open_save_dialog("masked" if self.session.confirmed else "ocr")
+
+    def _ask_unconfirmed_save(self) -> None:
         self._clear_dialog()
-        title = QLabel("別名で保存")
+        title = QLabel("候補が確定されていません")
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
-        self.save_path = QLineEdit(default)
+        body = QLabel("マスキング候補がまだ確定されていません。読み取ったPDFだけ保存するか、確定に進むかを選べます。")
+        body.setWordWrap(True)
+        ocr_only = QPushButton("OCRだけ保存する")
+        _mark(ocr_only, "btn")
+        ocr_only.setEnabled(self.ocr_ran)
+        ocr_only.setToolTip(
+            "マスキングせず、読み取ったPDFだけを別名で保存します。"
+            if self.ocr_ran
+            else "文字の読み取りがまだなので、読み取ったPDFは保存できません。"
+        )
+        ocr_only.clicked.connect(lambda: self._open_save_dialog("ocr"))
+        go = QPushButton("確定に進む")
+        _mark(go, "primary")
+        go.setToolTip("マスキングの確定画面を開きます。")
+        go.clicked.connect(self._open_confirm)
+        cancel = QPushButton("キャンセル")
+        _mark(cancel, "btn")
+        cancel.setToolTip("保存せずに戻ります。")
+        cancel.clicked.connect(self.shade.hide)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(cancel)
+        buttons.addWidget(ocr_only)
+        buttons.addWidget(go)
+        self.dialog_layout.addWidget(title)
+        self.dialog_layout.addWidget(body)
+        self.dialog_layout.addLayout(buttons)
+        self._show_shade()
+
+    def _open_save_dialog(self, mode: str) -> None:
+        if not self.session:
+            return
+        self._save_mode = mode
+        source = Path(self.session.document.source_path)
+        suffix = "_Masked" if mode == "masked" else "_OCR"
+        extras = ("_墨消し記録.csv", "_置換表.csv") if mode == "masked" else ()
+        default = unique_destination(source.with_name(source.stem + suffix + ".pdf"), extras)
+        self._clear_dialog()
+        title = QLabel("マスキングしたPDFを保存" if mode == "masked" else "読み取ったPDFを保存")
+        title.setStyleSheet("font-size: 18px; font-weight: 600;")
+        self.save_path = QLineEdit(str(default))
         browse = QPushButton("参照…")
         _mark(browse, "btn")
+        browse.setToolTip("保存先のファイル名を選びます。")
         browse.clicked.connect(self._browse_save)
         path_row = QHBoxLayout()
         path_row.addWidget(self.save_path, 1)
         path_row.addWidget(browse)
-        self.opt_align = self._option("枠の幅をそろえる", True, "置換枠をすべて同じ幅にし、\n元の語句の長さを推測されにくくします")
-        self.opt_meta = self._option("メタデータを消す", True, "作成者・更新日時・作成ソフトなどを消します")
-        self.opt_log = self._option("墨消し記録を出力", True, "ページ・場所・種類・呼び名の一覧（CSV）")
-        self.opt_terms = self._option("元の語句を含める", False, "記録自体が機密になります")
-        self.opt_table = self._option("置換表を別ファイルに保存", False, "PDFには入りません\n別ファイル（.csv）に保存します")
+        self.opt_meta = self._option("メタデータを消す", True, "作成者や更新日時などの情報を、保存するPDFから消します。")
         buttons = QHBoxLayout()
         cancel = QPushButton("キャンセル")
         _mark(cancel, "btn")
+        cancel.setToolTip("保存せずに戻ります。")
         cancel.clicked.connect(self.shade.hide)
         go = QPushButton("保存")
         _mark(go, "primary")
-        go.setToolTip("保存後、消した語句が残っていないか自動で確認します")
+        go.setToolTip(
+            "この名前で保存し、消し残りがないか確認します。"
+            if mode == "masked"
+            else "この名前で、読み取ったPDFを保存します。マスキングはしません。"
+        )
         go.clicked.connect(self._save)
         buttons.addStretch(1)
         buttons.addWidget(cancel)
@@ -1004,8 +1243,18 @@ class MainWindow(QMainWindow):
         self.dialog_layout.addWidget(title)
         self.dialog_layout.addWidget(QLabel("ファイル名"))
         self.dialog_layout.addLayout(path_row)
-        for box in (self.opt_align, self.opt_meta, self.opt_log, self.opt_terms, self.opt_table):
-            self.dialog_layout.addWidget(box)
+        self.dialog_layout.addWidget(self.opt_meta)
+        if mode == "masked":
+            self.opt_align = self._option(
+                "枠の幅をそろえる",
+                True,
+                "短いマスキング枠を広げ、元の語句の長さが分かりにくくします。長い枠は縮めません。",
+            )
+            self.opt_log = self._option("墨消し記録を出力", True, "マスキングした位置と種類の一覧を、CSVで書き出します。")
+            self.opt_terms = self._option("元の語句を含める", False, "記録に元の語句を入れます。そのCSVも機密になります。")
+            self.opt_table = self._option("置換表を別ファイルに保存", False, "呼び名の対応表を、PDFとは別のCSVに保存します。")
+            for box in (self.opt_align, self.opt_log, self.opt_terms, self.opt_table):
+                self.dialog_layout.addWidget(box)
         self.dialog_layout.addLayout(buttons)
         self._show_shade()
 
@@ -1028,16 +1277,37 @@ class MainWindow(QMainWindow):
         if dest.resolve() == source:
             QMessageBox.warning(self, "ekisui-pdf", "元のファイルは上書きしません。別の名前を指定してください。")
             return
-        self.align_boxes = self.opt_align.isChecked()
-        options = SaveOptions(
-            align_box_width=self.align_boxes,
-            strip_metadata=self.opt_meta.isChecked(),
-            export_log=self.opt_log.isChecked(),
-            include_original_terms=self.opt_terms.isChecked(),
-            export_replacement_table=self.opt_table.isChecked(),
-        )
+        masked = self._save_mode == "masked"
+        extras = ("_墨消し記録.csv", "_置換表.csv") if masked else ()
+        dest = unique_destination(dest, extras)
+        if masked:
+            self.align_boxes = self.opt_align.isChecked()
+            options = SaveOptions(
+                align_box_width=self.align_boxes,
+                strip_metadata=self.opt_meta.isChecked(),
+                export_log=self.opt_log.isChecked(),
+                include_original_terms=self.opt_terms.isChecked(),
+                export_replacement_table=self.opt_table.isChecked(),
+            )
+            groups = self.session.groups
+        else:
+            options = SaveOptions(
+                align_box_width=False,
+                strip_metadata=self.opt_meta.isChecked(),
+                export_log=False,
+                include_original_terms=False,
+                export_replacement_table=False,
+            )
+            groups = []
         try:
-            result = export_pdf(self.session.document, self.session.groups, dest, options, self.session.settings)
+            result = export_pdf(self.session.document, groups, dest, options, self.session.settings)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "ekisui-pdf", f"保存できませんでした。\n{exc}")
+            return
+        if not masked:
+            self._show_ocr_saved(result.pdf_path)
+            return
+        try:
             report = verify_pdf(
                 result.pdf_path,
                 self.session.groups,
@@ -1046,9 +1316,28 @@ class MainWindow(QMainWindow):
                 options.strip_metadata,
             )
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "ekisui-pdf", f"保存できませんでした。\n{exc}")
+            QMessageBox.warning(self, "ekisui-pdf", f"保存後の確認ができませんでした。\n{exc}")
             return
         self._show_verify(result.pdf_path, result.log_path, report)
+
+    def _show_ocr_saved(self, pdf_path: str) -> None:
+        self._clear_dialog()
+        title = QLabel("保存しました")
+        title.setStyleSheet("font-size: 18px; font-weight: 600; color: #1e6b34;")
+        body = QLabel(f"読み取ったPDFを保存しました。マスキングはしていません。\n保存先 {Path(pdf_path).name}")
+        body.setWordWrap(True)
+        close = QPushButton("閉じる")
+        _mark(close, "primary")
+        close.setToolTip("この画面を閉じます。")
+        close.clicked.connect(self.shade.hide)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(close)
+        self.dialog_layout.addWidget(title)
+        self.dialog_layout.addWidget(body)
+        self.dialog_layout.addLayout(buttons)
+        self.preview = False
+        self._show_shade()
 
     def _show_verify(self, pdf_path: str, log_path: str | None, report: VerifyReport) -> None:
         self._clear_dialog()
@@ -1090,7 +1379,7 @@ class MainWindow(QMainWindow):
                 row.addWidget(QLabel(f"p.{leftover.page_index + 1}"))
                 jump = QPushButton("移動")
                 _mark(jump, "btn")
-                jump.setToolTip("このページを開いて選択します")
+                jump.setToolTip("このページを開きます。")
                 jump.clicked.connect(lambda _c=False, page=leftover.page_index: self._jump_from_verify(page))
                 row.addWidget(jump)
                 holder_box.addLayout(row)
@@ -1104,7 +1393,7 @@ class MainWindow(QMainWindow):
         if report.passed:
             folder = QPushButton("フォルダを開く")
             _mark(folder, "btn")
-            folder.setToolTip("エクスプローラーで開く")
+            folder.setToolTip("保存したファイルのフォルダを開きます。")
             folder.clicked.connect(lambda: os.startfile(str(Path(pdf_path).parent)) if hasattr(os, "startfile") else None)
             close = QPushButton("閉じる")
             _mark(close, "primary")
@@ -1149,9 +1438,11 @@ class MainWindow(QMainWindow):
         self.review = QSpinBox()
         self.review.setRange(50, 99)
         self.review.setValue(round(current.review_below * 100))
+        self.review_label = QLabel("要確認にする信頼度（%）")
         self.align = QSpinBox()
         self.align.setRange(1, 12)
         self.align.setValue(current.align_chars)
+        self.align_label = QLabel("枠の幅（文字数）")
         buttons = QHBoxLayout()
         cancel = QPushButton("キャンセル")
         _mark(cancel, "btn")
@@ -1163,14 +1454,37 @@ class MainWindow(QMainWindow):
         buttons.addWidget(cancel)
         buttons.addWidget(apply)
         self.dialog_layout.addWidget(title)
-        self.dialog_layout.addWidget(self.fuzzy_label)
+        self.dialog_layout.addWidget(self._info_row(
+            self.fuzzy_label,
+            "4文字以上だけに効きます（初期値60%）。下げると読み違いを多く拾い、上げると厳しい一致だけ残します。2〜3文字はこの％を使わず、全体が読み間違い表で一致する語句は残します。",
+        ))
         self.dialog_layout.addWidget(self.fuzzy)
-        self.dialog_layout.addWidget(QLabel("要確認にする信頼度（%）"))
+        self.dialog_layout.addWidget(self._info_row(
+            self.review_label,
+            "この％未満の読み取り行を要確認にします（初期値80%）。上げると多くの行が対象になり、下げると自信のない行だけです。手で直した行は対象外です。",
+        ))
         self.dialog_layout.addWidget(self.review)
-        self.dialog_layout.addWidget(QLabel("枠の幅（文字数）"))
+        self.dialog_layout.addWidget(self._info_row(
+            self.align_label,
+            "短いマスキング枠の最小の幅です（初期値5文字）。上げると元の長さが分かりにくくなり、下げると実際の長さに近づきます。もともと広い枠は縮みません。",
+        ))
         self.dialog_layout.addWidget(self.align)
         self.dialog_layout.addLayout(buttons)
         self._show_shade()
+
+    def _info_row(self, label: QLabel, tip: str) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        info = QPushButton("i")
+        info.setObjectName("info")
+        info.setToolTip(tip)
+        info.setCursor(Qt.CursorShape.PointingHandCursor)
+        info.clicked.connect(lambda _checked=False, button=info, text=tip: QToolTip.showText(button.mapToGlobal(QPoint(0, button.height())), text, button))
+        layout.addWidget(label)
+        layout.addWidget(info)
+        layout.addStretch(1)
+        return row
 
     def _apply_settings(self) -> None:
         updated = replace(

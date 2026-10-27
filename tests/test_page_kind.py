@@ -7,7 +7,7 @@ import pytest
 from PIL import Image, ImageDraw, ImageFont
 
 from ekisui.domain.session import Session
-from ekisui.domain.types import Action, Document, Page, PageKind, Rect, SaveOptions, TextLine, TextSource
+from ekisui.domain.types import Document, Page, PageKind, Rect, SaveOptions, TextLine, TextSource
 from ekisui.errors import EkisuiError
 from ekisui.pdf.document import open_document
 from ekisui.pdf.export import export_pdf
@@ -303,7 +303,7 @@ def test_region_on_an_unchanged_page_survives_rebind() -> None:
     assert abs(kept[0].hit.bbox.y0 - 400) < 1
 
 
-def test_checked_candidate_stays_checked_after_rebind() -> None:
+def test_ocr_rebind_drops_auto_candidates() -> None:
     old_page = Page(
         index=0,
         width=600,
@@ -316,10 +316,7 @@ def test_checked_candidate_stays_checked_after_rebind() -> None:
     opened = Document(source_path="memory.pdf", pages=(old_page,))
     session = Session(opened)
     session.suggest()
-    group = next(item for item in session.groups if "AB12345678" in item.canonical)
-    assert group.hits[0].included is False
-    group.hits[0].included = True
-    group.action = Action.BLACKOUT
+    assert any("AB12345678" in item.canonical for item in session.groups)
     rebuilt = Page(
         index=0,
         width=600,
@@ -333,6 +330,4 @@ def test_checked_candidate_stays_checked_after_rebind() -> None:
     )
     session.document = Document(source_path="memory.pdf", pages=(rebuilt,))
     session.rebind_after_ocr(opened)
-    restored = next(item for item in session.groups if "AB12345678" in item.canonical)
-    assert restored.action == Action.BLACKOUT
-    assert any(hit.included and "AB12345678" in hit.hit.surface for hit in restored.hits)
+    assert session.groups == []

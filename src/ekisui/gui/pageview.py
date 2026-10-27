@@ -1,10 +1,73 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QLineEdit, QPushButton, QScrollArea, QWidget
+from PySide6.QtWidgets import QLineEdit, QMenu, QPushButton, QScrollArea, QToolTip, QWidget
 
 from ekisui.domain.types import Action, MatchKind, Rect, TextLine
+
+_HANDLE = 8.0
+_LEFT_TIP = "左にドラッグすると範囲の先頭を1文字ずつ動かします。"
+_RIGHT_TIP = "右にドラッグすると範囲の末尾を1文字ずつ動かします。"
+_MARKER_TIP = "手動で範囲を調整しました。"
+
+
+def place_inline_editor(
+    anchor: tuple[float, float, float, float],
+    view: tuple[float, float, float, float],
+    scale: float = 1.0,
+) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+    """Place the field and 確定 button inside the visible view.
+
+    ``scale`` grows the chrome so tests can imitate 125% and 150%. The widget
+    passes 1 because Qt geometry is already in logical pixels.
+    """
+    ax, ay, aw, _ah = anchor
+    vx, vy, vw, vh = view
+    scale = max(scale, 0.5)
+    margin = 4.0 * scale
+    gap = 4.0 * scale
+    btn_w = 64.0 * scale
+    btn_h = 32.0 * scale
+    field_h = 32.0 * scale
+    min_w = 180.0 * scale
+    left = vx + margin
+    top = vy + margin
+    right = vx + vw - margin
+    bottom = vy + vh - margin
+    avail = max(btn_w + gap + 24.0 * scale, right - left)
+    field_w = min(max(min_w, aw), max(24.0 * scale, avail - gap - btn_w))
+    fx = ax
+    bx = fx + field_w + gap
+    if bx + btn_w > right or fx < left:
+        cluster_right = min(max(ax + aw, left + field_w), right)
+        fx = cluster_right - field_w
+        bx = fx - gap - btn_w
+        if bx < left:
+            bx = left
+            fx = bx + btn_w + gap
+            field_w = max(24.0 * scale, min(field_w, right - fx))
+    if fx < left:
+        fx = left
+    if bx + btn_w > right:
+        bx = right - btn_w
+        fx = min(fx, bx - gap - field_w)
+        if fx < left:
+            fx = left
+            field_w = max(24.0 * scale, bx - gap - fx)
+    fy = ay
+    chrome_h = max(field_h, btn_h)
+    if fy + chrome_h > bottom:
+        fy = ay - chrome_h
+    if fy < top:
+        fy = top
+    if fy + chrome_h > bottom:
+        fy = max(top, bottom - chrome_h)
+
+    def box(x: float, y: float, w: float, h: float) -> tuple[int, int, int, int]:
+        return (int(round(x)), int(round(y)), max(1, int(round(w))), max(1, int(round(h))))
+
+    return box(fx, fy, field_w, field_h), box(bx, fy, btn_w, btn_h)
 
 
 class PageCanvas(QWidget):
@@ -12,6 +75,9 @@ class PageCanvas(QWidget):
     lineActivated = Signal(str)
     editConfirmed = Signal(str, str)
     editCancelled = Signal()
+    hitAdjusted = Signal(str, str, float)
+    hitRestore = Signal(str)
+    hitSelected = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -32,13 +98,15 @@ class PageCanvas(QWidget):
         self._origin = QPoint(0, 0)
         self._rubber: QRectF | None = None
         self._dragging = False
+        self._handle: tuple[str, str] | None = None
         self.editor = QLineEdit(self)
         self.editor.hide()
         self.editor.setFont(QFont(self.font().family(), 12))
         self.editor.returnPressed.connect(self._confirm_edit)
+        self.editor.installEventFilter(self)
         self.ok_button = QPushButton("確定", self)
         self.ok_button.setProperty("class", "ib")
-        self.ok_button.setToolTip("Enterで確定・Escで取消")
+        self.ok_button.setToolTip("この行の文字を確定します。（Enterで確定、Escで取消）")
         self.ok_button.hide()
         self.ok_button.clicked.connect(self._confirm_edit)
         self._edit_line = ""
@@ -47,6 +115,7 @@ class PageCanvas(QWidget):
     def set_zoom(self, zoom: float) -> None:
         self.zoom = max(0.25, min(zoom, 4.0))
         self._relayout()
+        self.reposition_edit()
 
     def set_page(self, pixmap: QPixmap | None, width: float, height: float) -> None:
         self.pixmap = pixmap
@@ -72,13 +141,46 @@ class PageCanvas(QWidget):
     def begin_edit(self, line: TextLine) -> None:
         self._edit_line = line.id
         self.editor.setText(line.text)
-        rect = self._map(line.bbox)
-        self.editor.setGeometry(int(rect.x()), int(rect.y()), max(180, int(rect.width())), 32)
-        self.ok_button.setGeometry(self.editor.geometry().right() + 4, int(rect.y()), 64, 32)
+        self._place(line)
         self.editor.show()
         self.ok_button.show()
         self.editor.setFocus()
         self.editor.selectAll()
+
+    def reposition_edit(self, *_args) -> None:
+        if not self._edit_line:
+            return
+        line = next((item for item in self.lines if item.id == self._edit_line), None)
+        if line is None:
+            return
+        self._place(line)
+
+    def _place(self, line: TextLine) -> None:
+        rect = self._map(line.bbox)
+        field, button = place_inline_editor(
+            (rect.x(), rect.y(), rect.width(), rect.height()),
+            self._visible_rect(),
+            scale=1.0,
+        )
+        self.editor.setGeometry(*field)
+        self.ok_button.setGeometry(*button)
+
+    def _visible_rect(self) -> tuple[float, float, float, float]:
+        area = self._scroll_area()
+        if area is None:
+            return (0.0, 0.0, float(max(self.width(), 1)), float(max(self.height(), 1)))
+        viewport = area.viewport()
+        # The canvas sits inside the viewport, so map from the parent, not to it.
+        origin = self.mapFrom(viewport, QPoint(0, 0))
+        return (float(origin.x()), float(origin.y()), float(viewport.width()), float(viewport.height()))
+
+    def _scroll_area(self) -> QScrollArea | None:
+        parent = self.parent()
+        while parent is not None:
+            if isinstance(parent, QScrollArea):
+                return parent
+            parent = parent.parent()
+        return None
 
     def cancel_edit(self) -> None:
         self._edit_line = ""
@@ -93,6 +195,13 @@ class PageCanvas(QWidget):
         self.cancel_edit()
         self.editConfirmed.emit(line_id, text)
 
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if obj is self.editor and event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+            self.cancel_edit()
+            self.editCancelled.emit()
+            return True
+        return super().eventFilter(obj, event)
+
     def keyPressEvent(self, event) -> None:  # noqa: N802
         if event.key() == Qt.Key.Key_Escape and self.editor.isVisible():
             self.cancel_edit()
@@ -101,13 +210,25 @@ class PageCanvas(QWidget):
         super().keyPressEvent(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.RightButton:
+            self._popup(event)
+            return
         if event.button() != Qt.MouseButton.LeftButton:
+            return
+        handle = self._handle_at(event.position())
+        if handle is not None and not self.region_mode:
+            self._handle = handle
+            self.hitSelected.emit(handle[0])
             return
         x, y = self.page_point(event.position())
         if self.region_mode:
             self._dragging = True
             self._rubber = QRectF(x, y, 1, 1)
             self.update()
+            return
+        hit = self._hit_at(x, y)
+        if hit is not None and self.show_hits and not self.show_boxes:
+            self.hitSelected.emit(hit["id"])
             return
         if self.show_lines:
             for line in reversed(self.lines):
@@ -116,15 +237,23 @@ class PageCanvas(QWidget):
                     return
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        if not self._dragging or self._rubber is None:
+        if self._handle is not None:
+            x, _y = self.page_point(event.position())
+            hit_id, edge = self._handle
+            self.hitAdjusted.emit(hit_id, edge, x)
             return
-        x, y = self.page_point(event.position())
-        self._rubber.setBottomRight(self._rubber.topLeft() + QPoint(0, 0))
-        start = self._rubber.topLeft()
-        self._rubber = QRectF(start.x(), start.y(), x - start.x(), y - start.y()).normalized()
-        self.update()
+        if self._dragging and self._rubber is not None:
+            x, y = self.page_point(event.position())
+            start = self._rubber.topLeft()
+            self._rubber = QRectF(start.x(), start.y(), x - start.x(), y - start.y()).normalized()
+            self.update()
+            return
+        self._hover_tip(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._handle is not None:
+            self._handle = None
+            return
         if not self._dragging or self._rubber is None:
             return
         self._dragging = False
@@ -133,6 +262,58 @@ class PageCanvas(QWidget):
         self.update()
         if rect.width() > 4 and rect.height() > 4:
             self.regionChosen.emit(Rect(rect.x(), rect.y(), rect.right(), rect.bottom()))
+
+    def _popup(self, event) -> None:
+        x, y = self.page_point(event.position())
+        hit = self._hit_at(x, y)
+        if hit is None or not hit.get("adjusted"):
+            return
+        menu = QMenu(self)
+        action = menu.addAction("自動の範囲に戻す")
+        chosen = menu.exec(event.globalPosition().toPoint())
+        if chosen is action:
+            self.hitRestore.emit(hit["id"])
+
+    def _hover_tip(self, event) -> None:
+        handle = self._handle_at(event.position())
+        if handle is not None:
+            QToolTip.showText(event.globalPosition().toPoint(), _LEFT_TIP if handle[1] == "left" else _RIGHT_TIP, self)
+            return
+        x, y = self.page_point(event.position())
+        for hit in self.hits:
+            if not hit.get("adjusted"):
+                continue
+            marker = self._marker_rect(self._map(hit["bbox"]))
+            if marker.contains(event.position()):
+                QToolTip.showText(event.globalPosition().toPoint(), _MARKER_TIP, self)
+                return
+
+    def _hit_at(self, x: float, y: float) -> dict | None:
+        for hit in reversed(self.hits):
+            if hit["bbox"].contains(x, y):
+                return hit
+        return None
+
+    def _handle_at(self, pos: QPointF) -> tuple[str, str] | None:
+        if not self.selected_hit or not self.show_hits or self.show_boxes:
+            return None
+        for hit in self.hits:
+            if hit["id"] != self.selected_hit:
+                continue
+            mapped = self._map(hit["bbox"])
+            if self._handle_rect(mapped, "left").contains(pos):
+                return hit["id"], "left"
+            if self._handle_rect(mapped, "right").contains(pos):
+                return hit["id"], "right"
+        return None
+
+    def _handle_rect(self, mapped: QRectF, edge: str) -> QRectF:
+        if edge == "left":
+            return QRectF(mapped.left() - _HANDLE / 2, mapped.center().y() - _HANDLE, _HANDLE, _HANDLE * 2)
+        return QRectF(mapped.right() - _HANDLE / 2, mapped.center().y() - _HANDLE, _HANDLE, _HANDLE * 2)
+
+    def _marker_rect(self, mapped: QRectF) -> QRectF:
+        return QRectF(mapped.right() - 12, mapped.top() + 2, 8, 8)
 
     def _map(self, rect: Rect) -> QRectF:
         return QRectF(
@@ -161,6 +342,7 @@ class PageCanvas(QWidget):
         if self.show_hits and not self.show_boxes:
             for hit in self.hits:
                 kind = hit["kind"]
+                mapped = self._map(hit["bbox"])
                 if kind == MatchKind.EXACT:
                     painter.setPen(QPen(QColor("#d4a000"), 1.4))
                     painter.setBrush(QColor(255, 215, 64, 130))
@@ -169,7 +351,16 @@ class PageCanvas(QWidget):
                     painter.setBrush(QColor(255, 160, 90, 120))
                 if hit["id"] == self.selected_hit:
                     painter.setPen(QPen(QColor("#0f6cbd"), 2.2))
-                painter.drawRect(self._map(hit["bbox"]))
+                painter.drawRect(mapped)
+                if hit.get("adjusted"):
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QColor("#0f6cbd"))
+                    painter.drawEllipse(self._marker_rect(mapped))
+                if hit["id"] == self.selected_hit:
+                    painter.setPen(QPen(QColor("#0f6cbd"), 1.2))
+                    painter.setBrush(QColor("#ffffff"))
+                    painter.drawRect(self._handle_rect(mapped, "left"))
+                    painter.drawRect(self._handle_rect(mapped, "right"))
         if self.show_boxes:
             for box in self.boxes:
                 mapped = self._map(box["rect"])
@@ -192,9 +383,46 @@ class PageCanvas(QWidget):
 
 
 class PageView(QScrollArea):
+    zoomRequested = Signal(float, QPointF, bool)
+
     def __init__(self, canvas: PageCanvas) -> None:
         super().__init__()
         self.setWidget(canvas)
         self.setWidgetResizable(False)
         self.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         self.setStyleSheet("QScrollArea { background: #d9dbde; border: none; }")
+        self.viewport().installEventFilter(self)
+        self.viewport().grabGesture(Qt.GestureType.PinchGesture)
+        self.horizontalScrollBar().valueChanged.connect(canvas.reposition_edit)
+        self.verticalScrollBar().valueChanged.connect(canvas.reposition_edit)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        canvas = self.widget()
+        if isinstance(canvas, PageCanvas):
+            canvas.reposition_edit()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if obj is self.viewport() and event.type() == QEvent.Type.Wheel:
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                delta = event.angleDelta().y()
+                if delta:
+                    factor = 1.15 if delta > 0 else 1 / 1.15
+                    self.zoomRequested.emit(factor, QPointF(event.position()), True)
+                return True
+        if obj is self.viewport() and event.type() == QEvent.Type.NativeGesture:
+            if event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                factor = 1.0 + float(event.value())
+                self.zoomRequested.emit(factor, QPointF(event.position()), bool(event.isEndEvent()))
+                return True
+        return super().eventFilter(obj, event)
+
+    def viewportEvent(self, event) -> bool:  # noqa: N802
+        if event.type() == QEvent.Type.Gesture:
+            pinch = event.gesture(Qt.GestureType.PinchGesture)
+            if pinch is not None and pinch.state() != Qt.GestureState.GestureCanceled:
+                done = pinch.state() == Qt.GestureState.GestureFinished
+                factor = float(pinch.scaleFactor()) or 1.0
+                self.zoomRequested.emit(factor, QPointF(pinch.centerPoint()), done)
+                return True
+        return super().viewportEvent(event)

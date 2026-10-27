@@ -2,7 +2,7 @@ from ekisui.domain.candidates import load_surnames, suggest
 from ekisui.domain.index import build_document_index
 from ekisui.domain.normalize import load_confusables
 from ekisui.domain.session import Session
-from ekisui.domain.types import Category, Settings
+from ekisui.domain.types import Action, Category, Settings
 
 from factory import document_from_lines
 
@@ -39,6 +39,11 @@ def test_auto_categories_and_defaults():
     assert Category.POSTAL in by_cat
     assert Category.ADDRESS in by_cat
     assert Category.ALNUM in by_cat
+    address = by_cat[Category.ADDRESS][0]
+    assert "架空町1-2-3" in address.canonical
+    assert address.action == Action.REPLACE
+    assert address.pseudonym == "住所A"
+    assert all(hit.included for hit in address.hits)
     company = by_cat[Category.COMPANY][0]
     assert company.pseudonym == "会社A"
     assert company.action.name == "REPLACE"

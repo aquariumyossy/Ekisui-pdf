@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
+from ekisui.domain.address import address_key
+from ekisui.domain.adjust import bbox_of_range, bind_span, move_edge, snap_boundary
 from ekisui.domain.candidates import AutoGroup, suggest
-from ekisui.domain.index import build_document_index
+from ekisui.domain.index import _cells, build_document_index
 from ekisui.domain.match import search_pages, text_in_rect
 from ekisui.domain.normalize import ConfusableTable, load_confusables, strict_text
-from ekisui.domain.pseudonym import company_name, person_name, phrase_name
+from ekisui.domain.pseudonym import address_name, company_name, person_name, phrase_name
 from ekisui.domain.types import (
     Action,
     Category,
@@ -28,6 +30,13 @@ class TrackedHit:
     id: str
     hit: Hit
     included: bool
+    adjusted: bool = False
+    original_hit: Hit | None = None
+    line_id: str = ""
+    start: int = -1
+    end: int = -1
+    original_start: int = -1
+    original_end: int = -1
 
 
 @dataclass
@@ -71,13 +80,20 @@ class Session:
 
     def suggest(self) -> None:
         autos = suggest(self.index(), self.settings, self.table)
-        existing = {(strict_text(group.canonical), group.category) for group in self.groups}
-        for auto in autos:
-            key = (strict_text(auto.canonical), auto.category)
+        plain = [auto for auto in autos if auto.category != Category.ADDRESS]
+        addresses = sorted(
+            (auto for auto in autos if auto.category == Category.ADDRESS),
+            key=lambda auto: (auto.hits[0].page_index, auto.hits[0].bbox.y0, auto.hits[0].bbox.x0),
+        )
+        existing = {_group_key(group.canonical, group.category) for group in self.groups}
+        for auto in [*plain, *addresses]:
+            key = _group_key(auto.canonical, auto.category)
             if key in existing:
                 self._merge_hits(auto)
                 continue
-            self._add_group(auto.category, auto.canonical, auto.hits, origin="auto")
+            self._add_group(
+                auto.category, auto.canonical, auto.hits, origin="auto", action=auto.action
+            )
             existing.add(key)
         self.confirmed = False
 
@@ -204,21 +220,12 @@ class Session:
         self._index = None
         if not changed:
             return
+        # OCR rebuilds pages. It does not extract masking candidates.
+        # マスキング実行 calls rescan() afterwards when the user asked for both.
         pending: list[tuple[TermGroup, list[TrackedHit]]] = []
         kept: list[TermGroup] = []
-        remembered: list[tuple] = []
         for group in self.groups:
             stale = [hit for hit in group.hits if hit.hit.page_index in changed]
-            if group.origin == "auto" and stale:
-                remembered.append(
-                    (
-                        group.canonical,
-                        group.category,
-                        group.action,
-                        group.pseudonym,
-                        {strict_text(hit.hit.surface): hit.included for hit in stale},
-                    )
-                )
             group.hits = [hit for hit in group.hits if hit.hit.page_index not in changed]
             if group.origin == "auto":
                 if group.hits:
@@ -228,18 +235,6 @@ class Session:
             if stale:
                 pending.append((group, stale))
         self.groups = kept
-        self.suggest()
-        for canonical, category, action, pseudonym, flags in remembered:
-            restored = self._group_for_canonical(canonical, category)
-            if restored is None:
-                continue
-            restored.action = action
-            if pseudonym:
-                restored.pseudonym = pseudonym
-            for hit in restored.hits:
-                flag = flags.get(strict_text(hit.hit.surface))
-                if flag is not None:
-                    hit.included = flag
         for group, stale in pending:
             if group.origin == "region":
                 for tracked in stale:
@@ -264,6 +259,78 @@ class Session:
                     self._append_hits(group, extra, include_fuzzy=True, included=tracked.included)
         self.groups = [group for group in self.groups if group.hits]
         self.confirmed = False
+
+    def adjust_hit(self, hit_id: str, edge: str, page_x: float) -> None:
+        tracked = self._hit(hit_id)
+        self._ensure_span(tracked)
+        if tracked.start < 0 or not tracked.line_id:
+            return
+        line = self._line(tracked.line_id)
+        cells = _cells(line)
+        start, end = move_edge(
+            tracked.start,
+            tracked.end,
+            edge,
+            snap_boundary(cells, page_x),
+            len(line.text),
+        )
+        self._apply_span(tracked, line, cells, start, end)
+
+    def restore_hit(self, hit_id: str) -> None:
+        tracked = self._hit(hit_id)
+        if tracked.original_hit is None and not tracked.adjusted:
+            return
+        if tracked.original_hit is not None:
+            tracked.hit = tracked.original_hit
+        tracked.start = tracked.original_start
+        tracked.end = tracked.original_end
+        tracked.adjusted = False
+        tracked.original_hit = None
+        self.confirmed = False
+
+    def _ensure_span(self, tracked: TrackedHit) -> None:
+        if tracked.start >= 0 and tracked.line_id:
+            return
+        if not tracked.hit.line_ids:
+            return
+        line = self._line(tracked.hit.line_ids[0])
+        start, end = bind_span(line, tracked.hit.bbox)
+        if end <= start:
+            return
+        tracked.line_id = line.id
+        tracked.start = start
+        tracked.end = end
+        tracked.original_start = start
+        tracked.original_end = end
+
+    def _apply_span(self, tracked: TrackedHit, line: TextLine, cells: list[Rect], start: int, end: int) -> None:
+        if end <= start:
+            return
+        tracked.start = start
+        tracked.end = end
+        if start == tracked.original_start and end == tracked.original_end:
+            if tracked.original_hit is not None:
+                tracked.hit = tracked.original_hit
+            tracked.adjusted = False
+            tracked.original_hit = None
+        else:
+            if tracked.original_hit is None:
+                tracked.original_hit = tracked.hit
+            tracked.adjusted = True
+            tracked.hit = replace(
+                tracked.hit,
+                surface=line.text[start:end],
+                bbox=bbox_of_range(cells, start, end),
+                line_ids=(line.id,),
+            )
+        self.confirmed = False
+
+    def _line(self, line_id: str) -> TextLine:
+        for page in self.document.pages:
+            for line in page.lines:
+                if line.id == line_id:
+                    return line
+        raise KeyError(line_id)
 
     def set_included(self, hit_id: str, included: bool) -> None:
         hit = self._hit(hit_id)
@@ -311,7 +378,7 @@ class Session:
         self.confirmed = False
 
     def renumber(self) -> None:
-        companies = people = phrases = 0
+        companies = people = phrases = addresses = 0
         for group in self.groups:
             if group.action != Action.REPLACE:
                 continue
@@ -321,6 +388,9 @@ class Session:
             elif group.category == Category.PERSON:
                 group.pseudonym = person_name(people)
                 people += 1
+            elif group.category == Category.ADDRESS:
+                group.pseudonym = address_name(addresses)
+                addresses += 1
             else:
                 group.pseudonym = phrase_name(phrases)
                 phrases += 1
@@ -409,9 +479,9 @@ class Session:
         self._append_hits(group, auto.hits, include_fuzzy=False)
 
     def _group_for_canonical(self, text: str, category: Category) -> TermGroup | None:
-        key = strict_text(text)
+        key = _group_key(text, category)
         for group in self.groups:
-            if group.category == category and strict_text(group.canonical) == key:
+            if group.category == category and _group_key(group.canonical, category) == key:
                 return group
         return None
 
@@ -423,6 +493,8 @@ class Session:
                 name = company_name(index)
             elif category == Category.PERSON:
                 name = person_name(index)
+            elif category == Category.ADDRESS:
+                name = address_name(index)
             else:
                 name = phrase_name(index)
             if name not in used:
@@ -461,7 +533,15 @@ def _category_of_phrase(text: str) -> Category:
     return Category.PHRASE
 
 
+def _group_key(text: str, category: Category) -> str:
+    if category == Category.ADDRESS:
+        return address_key(text)
+    return strict_text(text)
+
+
 def _default_included(category: Category, hit: Hit, include_fuzzy: bool) -> bool:
+    if not hit.checked:
+        return False
     if category == Category.ALNUM:
         return False
     if hit.kind.name == "EXACT" or hit.ocr_like:

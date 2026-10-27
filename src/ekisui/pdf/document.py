@@ -52,6 +52,11 @@ _MIN_IMAGE_PIXELS = 4_000
 _VISIBLE_ALPHA = 13
 
 
+def pages_need_ocr(document: Document) -> bool:
+    """Scanned pages still waiting for a straightened image."""
+    return any(page.kind == PageKind.SCANNED and not page.image_path for page in document.pages)
+
+
 def needs_ocr(page: pymupdf.Page, compact: str) -> bool:
     """A page-sized image is a scan, even with a fax header or a stamp.
 

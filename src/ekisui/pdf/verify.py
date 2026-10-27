@@ -69,13 +69,9 @@ def verify_pdf(
             included = group.included_hits()
             if not included:
                 continue
-            queries = [group.canonical]
+            queries = _queries_for(group)
             checked_terms += 1
-            checked_surfaces += 1
-            for tracked in included:
-                if strict_text(tracked.hit.surface) != strict_text(group.canonical):
-                    queries.append(tracked.hit.surface)
-                    checked_surfaces += 1
+            checked_surfaces += len(queries)
             for query in queries:
                 for hit in search_pages(index, query, settings, table):
                     key = (strict_text(hit.surface), hit.page_index, int(hit.bbox.x0), int(hit.bbox.y0))
@@ -103,6 +99,23 @@ def verify_pdf(
         )
     finally:
         opened.close()
+
+
+def _queries_for(group: TermGroup) -> list[str]:
+    """Adjusted hits are checked at their current text, not the original canonical."""
+    included = group.included_hits()
+    queries: list[str] = []
+    if any(not tracked.adjusted for tracked in included):
+        queries.append(group.canonical)
+    for tracked in included:
+        surface = tracked.hit.surface
+        if not tracked.adjusted and strict_text(surface) == strict_text(group.canonical):
+            continue
+        if all(strict_text(surface) != strict_text(query) for query in queries):
+            queries.append(surface)
+    if not queries and included:
+        queries.append(included[0].hit.surface)
+    return queries
 
 
 def _fragment_leftovers(index, query: str, seen: set) -> list[Leftover]:

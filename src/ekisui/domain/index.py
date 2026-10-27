@@ -78,11 +78,13 @@ def _cells(line: TextLine) -> list[Rect]:
 
 
 def _char_weight(ch: str) -> float:
-    if ch.isspace():
-        return 0.35
+    # Fullwidth space is east-asian width F. Weigh it before the narrow-space rule
+    # so a following address does not slide left onto the previous character.
     kind = unicodedata.east_asian_width(ch)
     if kind in {"W", "F"}:
         return 1.0
+    if ch.isspace():
+        return 0.35
     if kind in {"Na", "H"}:
         return 0.5
     return 0.65

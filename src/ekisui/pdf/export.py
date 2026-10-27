@@ -22,6 +22,7 @@ class RedactionBox:
     action: Action
     pseudonym: str | None
     original: str | None
+    adjusted: bool = False
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ def redaction_boxes(
                     action=action,
                     pseudonym=pseudonym,
                     original=tracked.hit.surface,
+                    adjusted=tracked.adjusted,
                 )
             )
     return boxes
@@ -181,10 +183,28 @@ def _csv_cell(value: object) -> str:
     return text
 
 
+def unique_destination(path: Path, extra_suffixes: tuple[str, ...] = ()) -> Path:
+    """Return ``path`` or ``stem (2).ext`` so nothing already on disk is replaced."""
+
+    def taken(candidate: Path) -> bool:
+        if candidate.exists():
+            return True
+        return any(candidate.with_name(candidate.stem + suffix).exists() for suffix in extra_suffixes)
+
+    if not taken(path):
+        return path
+    number = 2
+    while True:
+        candidate = path.with_name(f"{path.stem} ({number}){path.suffix}")
+        if not taken(candidate):
+            return candidate
+        number += 1
+
+
 def write_log(path: Path, boxes: list[RedactionBox], include_original: bool) -> None:
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n")
-        header = ["ページ", "左", "上", "右", "下", "種類", "呼び名"]
+        header = ["ページ", "左", "上", "右", "下", "種類", "呼び名", "調整"]
         if include_original:
             header.append("元の語句")
         writer.writerow(header)
@@ -197,6 +217,7 @@ def write_log(path: Path, boxes: list[RedactionBox], include_original: bool) -> 
                 round(box.rect.y1, 2),
                 "黒塗り" if box.action == Action.BLACKOUT else "置換",
                 box.pseudonym or "",
+                "手動" if box.adjusted else "",
             ]
             if include_original:
                 row.append(box.original or "")

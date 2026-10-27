@@ -26,3 +26,7 @@ def person_name(index: int) -> str:
 
 def phrase_name(index: int) -> str:
     return f"呼称{_letters(index)}"
+
+
+def address_name(index: int) -> str:
+    return f"住所{_letters(index)}"

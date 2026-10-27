@@ -40,13 +40,29 @@ jobs:
         run: python tools/verify_models.py
       - name: Bundle
         run: pyinstaller ekisui.spec
+      - name: Frozen smoke
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          New-Item -ItemType Directory -Force -Path dist\smoke-out | Out-Null
+          & dist\ekisui-pdf\ekisui-pdf.exe --smoke dist\smoke-out
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "SMOKE_EXIT $LASTEXITCODE"
+            if (Test-Path dist\smoke-out\smoke.log) { Get-Content dist\smoke-out\smoke.log }
+            exit 1
+          }
+          Get-Content dist\smoke-out\smoke.log
+          python tools/check_bundle.py dist\ekisui-pdf
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Inno Setup
         run: choco install innosetup -y
       - name: Installer
         run: |
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\ekisui-pdf.iss
       - name: SHA-256
-        run: Get-FileHash dist\ekisui-pdf-0.1.0-win64-setup.exe -Algorithm SHA256 | Format-List
+        run: |
+          Get-FileHash dist\ekisui-pdf-0.1.0-win64-setup.exe -Algorithm SHA256 | Format-List
+          $setup = (Get-Item dist\ekisui-pdf-0.1.0-win64-setup.exe).Length
+          Write-Host "SETUP_BYTES $setup"
       - uses: actions/upload-artifact@v4
         with:
           name: ekisui-pdf-0.1.0-win64-setup

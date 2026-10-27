@@ -1,0 +1,383 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+
+from ekisui.domain.candidates import AutoGroup, suggest
+from ekisui.domain.index import build_document_index
+from ekisui.domain.match import search_pages, text_in_rect
+from ekisui.domain.normalize import ConfusableTable, load_confusables, strict_text
+from ekisui.domain.pseudonym import company_name, person_name, phrase_name
+from ekisui.domain.types import (
+    Action,
+    Category,
+    DEFAULT_ACTION,
+    Document,
+    Hit,
+    MatchKind,
+    Page,
+    PageIndex,
+    Rect,
+    Settings,
+    TextLine,
+    TextSource,
+)
+
+
+@dataclass
+class TrackedHit:
+    id: str
+    hit: Hit
+    included: bool
+
+
+@dataclass
+class TermGroup:
+    id: str
+    canonical: str
+    category: Category
+    action: Action
+    pseudonym: str | None
+    hits: list[TrackedHit] = field(default_factory=list)
+    origin: str = "auto"
+
+    def included_hits(self) -> list[TrackedHit]:
+        return [hit for hit in self.hits if hit.included]
+
+
+class Session:
+    """Single writer for the open document, the selection list, and pseudonyms."""
+
+    def __init__(
+        self,
+        document: Document,
+        settings: Settings | None = None,
+        table: ConfusableTable | None = None,
+    ) -> None:
+        self.document = document
+        self.settings = settings or Settings()
+        self.table = table or load_confusables()
+        self.groups: list[TermGroup] = []
+        self._index: tuple[PageIndex, ...] | None = None
+        self._seq = 0
+        self.confirmed = False
+
+    def index(self) -> tuple[PageIndex, ...]:
+        if self._index is None:
+            self._index = build_document_index(self.document, self.table)
+        return self._index
+
+    def set_settings(self, settings: Settings) -> None:
+        self.settings = settings
+
+    def suggest(self) -> None:
+        autos = suggest(self.index(), self.settings, self.table)
+        existing = {(strict_text(group.canonical), group.category) for group in self.groups}
+        for auto in autos:
+            key = (strict_text(auto.canonical), auto.category)
+            if key in existing:
+                self._merge_hits(auto)
+                continue
+            self._add_group(auto.category, auto.canonical, auto.hits, origin="auto")
+            existing.add(key)
+        self.confirmed = False
+
+    def add_phrase(self, phrase: str) -> TermGroup | None:
+        text = phrase.strip()
+        if len(strict_text(text)) < 2:
+            return None
+        hits = search_pages(self.index(), text, self.settings, self.table)
+        if not hits:
+            return None
+        category = _category_of_phrase(text)
+        group = self._group_for_canonical(text, category)
+        if group is None:
+            group = self._add_group(category, text, hits, origin="search", include_fuzzy=False)
+        else:
+            self._append_hits(group, hits, include_fuzzy=False)
+        self.confirmed = False
+        return group
+
+    def add_region(self, page_index: int, rect: Rect) -> TermGroup | None:
+        page = self.index()[page_index]
+        text = text_in_rect(page, rect).strip()
+        if len(strict_text(text)) < 2:
+            hit = Hit(
+                page_index,
+                "（範囲）",
+                rect,
+                MatchKind.EXACT,
+                1.0,
+                "ドラッグした範囲",
+                (),
+                False,
+            )
+            group = self._add_group(Category.REGION, "（範囲）", [hit], origin="region")
+            self.confirmed = False
+            return group
+        hits = search_pages(self.index(), text, self.settings, self.table)
+        if not hits:
+            hits = []
+        group = self._group_for_canonical(text, Category.REGION)
+        if group is None:
+            group = self._add_group(Category.REGION, text, hits, origin="region", include_fuzzy=False)
+        else:
+            self._append_hits(group, hits, include_fuzzy=False)
+        self.confirmed = False
+        return group
+
+    def correct_line(self, line_id: str, new_text: str) -> None:
+        pages: list[Page] = []
+        found = False
+        for page in self.document.pages:
+            lines: list[TextLine] = []
+            for line in page.lines:
+                if line.id == line_id:
+                    found = True
+                    lines.append(
+                        replace(
+                            line,
+                            text=new_text,
+                            confidence=1.0,
+                            source=TextSource.CORRECTED,
+                        )
+                    )
+                else:
+                    lines.append(line)
+            pages.append(replace(page, lines=tuple(lines)))
+        if not found:
+            raise KeyError(line_id)
+        self.document = replace(self.document, pages=tuple(pages))
+        self._index = None
+        self.confirmed = False
+
+    def rescan(self) -> None:
+        manual = [group for group in self.groups if group.origin in {"search", "region", "table"}]
+        self.groups = []
+        self._index = None
+        self.suggest()
+        for group in manual:
+            hits = search_pages(self.index(), group.canonical, self.settings, self.table)
+            revived = self._add_group(
+                group.category,
+                group.canonical,
+                hits,
+                origin=group.origin,
+                include_fuzzy=True,
+                action=group.action,
+                pseudonym=group.pseudonym,
+            )
+            for old in group.hits:
+                if strict_text(old.hit.surface) == strict_text(group.canonical):
+                    continue
+                extra = search_pages(self.index(), old.hit.surface, self.settings, self.table)
+                self._append_hits(revived, extra, include_fuzzy=True, included=old.included)
+        self.confirmed = False
+
+    def set_included(self, hit_id: str, included: bool) -> None:
+        hit = self._hit(hit_id)
+        hit.included = included
+        self.confirmed = False
+
+    def set_included_many(self, hit_ids: list[str], included: bool) -> None:
+        for hit_id in hit_ids:
+            self._hit(hit_id).included = included
+        self.confirmed = False
+
+    def set_action(self, group_id: str, action: Action) -> None:
+        group = self._group(group_id)
+        group.action = action
+        if action == Action.REPLACE and not group.pseudonym:
+            group.pseudonym = self._allocate(group.category)
+        self.confirmed = False
+
+    def set_action_many(self, group_ids: list[str], action: Action) -> None:
+        for group_id in group_ids:
+            self.set_action(group_id, action)
+
+    def set_pseudonym(self, group_id: str, pseudonym: str) -> None:
+        self._group(group_id).pseudonym = pseudonym.strip()
+        self.confirmed = False
+
+    def add_variant(self, group_id: str, text: str) -> int:
+        group = self._group(group_id)
+        hits = search_pages(self.index(), text.strip(), self.settings, self.table)
+        before = len(group.hits)
+        self._append_hits(group, hits, include_fuzzy=True, included=True)
+        self.confirmed = False
+        return len(group.hits) - before
+
+    def remove_hit(self, hit_id: str) -> None:
+        for group in self.groups:
+            group.hits = [hit for hit in group.hits if hit.id != hit_id]
+        self.groups = [group for group in self.groups if group.hits]
+        self.confirmed = False
+
+    def exclude_unchecked(self) -> None:
+        for group in self.groups:
+            group.hits = [hit for hit in group.hits if hit.included]
+        self.groups = [group for group in self.groups if group.hits]
+        self.confirmed = False
+
+    def renumber(self) -> None:
+        companies = people = phrases = 0
+        for group in self.groups:
+            if group.action != Action.REPLACE:
+                continue
+            if group.category == Category.COMPANY:
+                group.pseudonym = company_name(companies)
+                companies += 1
+            elif group.category == Category.PERSON:
+                group.pseudonym = person_name(people)
+                people += 1
+            else:
+                group.pseudonym = phrase_name(phrases)
+                phrases += 1
+        self.confirmed = False
+
+    def import_rows(self, rows: list[tuple[str, str, str, str]]) -> None:
+        """Rows are (category label, canonical, pseudonym, variants joined by |)."""
+        from ekisui.domain.types import CATEGORY_LABEL
+
+        reverse = {label: category for category, label in CATEGORY_LABEL.items()}
+        for label, canonical, pseudonym, variants in rows:
+            category = reverse.get(label, Category.PHRASE)
+            hits = search_pages(self.index(), canonical, self.settings, self.table)
+            group = self._group_for_canonical(canonical, category)
+            if group is None:
+                group = self._add_group(
+                    category,
+                    canonical,
+                    hits,
+                    origin="table",
+                    include_fuzzy=True,
+                    action=Action.REPLACE,
+                    pseudonym=pseudonym or None,
+                )
+            else:
+                self._append_hits(group, hits, include_fuzzy=True)
+                group.action = Action.REPLACE
+                if pseudonym:
+                    group.pseudonym = pseudonym
+            for variant in [part for part in variants.split("|") if part]:
+                self.add_variant(group.id, variant)
+        self.confirmed = False
+
+    def _add_group(
+        self,
+        category: Category,
+        canonical: str,
+        hits: list[Hit] | tuple[Hit, ...],
+        origin: str,
+        include_fuzzy: bool = False,
+        action: Action | None = None,
+        pseudonym: str | None = None,
+    ) -> TermGroup:
+        chosen = action or DEFAULT_ACTION[category]
+        name = pseudonym
+        if chosen == Action.REPLACE and not name:
+            name = self._allocate(category)
+        group = TermGroup(
+            id=self._next("g"),
+            canonical=canonical,
+            category=category,
+            action=chosen,
+            pseudonym=name,
+            origin=origin,
+        )
+        self.groups.append(group)
+        self._append_hits(group, hits, include_fuzzy=include_fuzzy or origin != "auto")
+        return group
+
+    def _append_hits(
+        self,
+        group: TermGroup,
+        hits: list[Hit] | tuple[Hit, ...],
+        include_fuzzy: bool,
+        included: bool | None = None,
+    ) -> None:
+        for hit in hits:
+            if any(_same_place(existing.hit, hit) for existing in group.hits):
+                continue
+            if any(
+                _same_place(existing.hit, hit)
+                for other in self.groups
+                if other is not group
+                for existing in other.hits
+            ):
+                continue
+            flag = included
+            if flag is None:
+                flag = _default_included(group.category, hit, include_fuzzy)
+            group.hits.append(TrackedHit(self._next("h"), hit, flag))
+
+    def _merge_hits(self, auto: AutoGroup) -> None:
+        group = self._group_for_canonical(auto.canonical, auto.category)
+        if group is None:
+            return
+        self._append_hits(group, auto.hits, include_fuzzy=False)
+
+    def _group_for_canonical(self, text: str, category: Category) -> TermGroup | None:
+        key = strict_text(text)
+        for group in self.groups:
+            if group.category == category and strict_text(group.canonical) == key:
+                return group
+        return None
+
+    def _allocate(self, category: Category) -> str:
+        used = {group.pseudonym for group in self.groups if group.pseudonym}
+        index = 0
+        while True:
+            if category == Category.COMPANY:
+                name = company_name(index)
+            elif category == Category.PERSON:
+                name = person_name(index)
+            else:
+                name = phrase_name(index)
+            if name not in used:
+                return name
+            index += 1
+
+    def _group(self, group_id: str) -> TermGroup:
+        for group in self.groups:
+            if group.id == group_id:
+                return group
+        raise KeyError(group_id)
+
+    def _hit(self, hit_id: str) -> TrackedHit:
+        for group in self.groups:
+            for hit in group.hits:
+                if hit.id == hit_id:
+                    return hit
+        raise KeyError(hit_id)
+
+    def _next(self, prefix: str) -> str:
+        self._seq += 1
+        return f"{prefix}{self._seq}"
+
+
+def _category_of_phrase(text: str) -> Category:
+    from ekisui.domain.candidates import _COMPANY_RES, load_surnames, _person_re
+
+    folded = strict_text(text)
+    for pattern in _COMPANY_RES:
+        match = pattern.fullmatch(folded)
+        if match:
+            return Category.COMPANY
+    person = _person_re(load_surnames())
+    if person.fullmatch(folded):
+        return Category.PERSON
+    return Category.PHRASE
+
+
+def _default_included(category: Category, hit: Hit, include_fuzzy: bool) -> bool:
+    if category == Category.ALNUM:
+        return False
+    if hit.kind.name == "EXACT" or hit.ocr_like:
+        return True
+    return include_fuzzy
+
+
+def _same_place(left: Hit, right: Hit) -> bool:
+    return left.page_index == right.page_index and left.bbox.intersects(right.bbox) and (
+        abs(left.bbox.x0 - right.bbox.x0) < 1.5 and abs(left.bbox.y0 - right.bbox.y0) < 1.5
+    )

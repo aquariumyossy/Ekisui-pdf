@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+dist/
+build/
+dist-installer/
+models/*.onnx
+*.partial
+*.egg-info/
+ekisui-pdf-error.log

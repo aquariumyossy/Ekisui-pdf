@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -8,7 +9,7 @@ import pymupdf
 from ekisui.domain.normalize import strict_text
 from ekisui.domain.types import Document, Page, PageKind, Rect, TextLine, TextSource
 from ekisui.errors import EncryptedPdf
-from ekisui.pdf.deskew import correct_page, format_correction
+from ekisui.pdf.deskew import correct_page, format_correction, map_page_rect
 from ekisui.pdf.ocr_engine import PpOcrV5
 
 
@@ -21,8 +22,8 @@ def open_document(path: str | Path) -> Document:
         for index, page in enumerate(source):
             lines = extract_lines(page, index)
             compact = strict_text("".join(line.text for line in lines))
-            # A page-sized image is a scan even when a printer embedded invisible
-            # text. Born-digital pages have visible vector text and keep it.
+            # A page-sized image is a scan even when a fax header or stamp is
+            # also drawn on it. Born-digital pages have no page-sized image.
             kind = PageKind.SCANNED if needs_ocr(page, compact) else PageKind.NATIVE
             rect = page.rect
             pages.append(
@@ -42,24 +43,22 @@ def open_document(path: str | Path) -> Document:
         source.close()
 
 
-# A copier page is an image that fills most of the sheet and has no visible type.
+# A copier page is an image that fills most of the sheet.
 _SCAN_COVERAGE = 0.60
 # A 1×1 pixel stretched over the page, or a tiny stamp, is not a scan.
 # Strips and tiles of a low-resolution scan still clear this.
 _MIN_IMAGE_PIXELS = 4_000
+# Span alpha is 0–255. Render mode 3 is 0. Opacity 0.05 lands just above 12.
+_VISIBLE_ALPHA = 13
 
 
 def needs_ocr(page: pymupdf.Page, compact: str) -> bool:
-    """A scan is a page-sized image with no visible text.
+    """A page-sized image is a scan, even with a fax header or a stamp.
 
-    Printer OCR is invisible, so it does not keep the page as born digital.
-    Any visible glyph does: a short cover, a caption, or a name on a letterhead
-    stays as vector text. ``compact`` is the invisible layer as well as the
-    visible one, and is not used for this decision.
+    The visible vector text is kept and merged with OCR. ``compact`` includes
+    the invisible printer layer and is not used for this decision.
     """
     del compact
-    if visible_glyph_count(page) > 0:
-        return False
     return image_coverage(page) >= _SCAN_COVERAGE
 
 
@@ -98,19 +97,6 @@ def image_coverage(page: pymupdf.Page) -> float:
     return float(mask.mean())
 
 
-def visible_glyph_count(page: pymupdf.Page) -> int:
-    """Glyphs a reader can see. Render mode 3 and zero opacity are the copier layer."""
-    count = 0
-    for span in page.get_texttrace() or []:
-        if span.get("type") == 3:
-            continue
-        # 0.05 is stored as float32 and can be a hair above 0.05.
-        if float(span.get("opacity") or 0) <= 0.051:
-            continue
-        count += len(span.get("chars") or ())
-    return count
-
-
 def _placed_image_rect(page: pymupdf.Page, bbox) -> pymupdf.Rect | None:
     if not bbox:
         return None
@@ -131,9 +117,12 @@ def extract_lines(page: pymupdf.Page, page_index: int) -> list[TextLine]:
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):
-            pieces: list[str] = []
-            chars: list[Rect] = []
+            buckets: dict[bool, tuple[list[str], list[Rect]]] = {
+                True: ([], []),
+                False: ([], []),
+            }
             for span in line.get("spans", []):
+                pieces, chars = buckets[_span_visible(span)]
                 for char in span.get("chars") or []:
                     text = str(char.get("c") or "")
                     if not text:
@@ -150,24 +139,26 @@ def extract_lines(page: pymupdf.Page, page_index: int) -> list[TextLine]:
                                 float(y1),
                             )
                         )
-            text = "".join(pieces)
-            if not text.strip():
-                continue
-            bbox = chars[0]
-            for rect in chars[1:]:
-                bbox = bbox.union(rect)
-            lines.append(
-                TextLine(
-                    id=f"p{page_index}l{number}",
-                    page_index=page_index,
-                    text=text,
-                    bbox=bbox,
-                    confidence=1.0,
-                    source=TextSource.NATIVE,
-                    chars=tuple(chars),
+            for visible, (pieces, chars) in buckets.items():
+                text = "".join(pieces)
+                if not text.strip():
+                    continue
+                bbox = chars[0]
+                for rect in chars[1:]:
+                    bbox = bbox.union(rect)
+                lines.append(
+                    TextLine(
+                        id=f"p{page_index}l{number}",
+                        page_index=page_index,
+                        text=text,
+                        bbox=bbox,
+                        confidence=1.0,
+                        source=TextSource.NATIVE,
+                        chars=tuple(chars),
+                        visible=visible,
+                    )
                 )
-            )
-            number += 1
+                number += 1
     lines.sort(key=lambda item: (item.bbox.y0, item.bbox.x0))
     return lines
 
@@ -189,11 +180,11 @@ def recognize(
     on_page=None,
     cancelled=None,
 ) -> Document:
-    """OCR scanned pages, including full-page images that already have text.
+    """OCR every scanned page, including one that also has visible type.
 
-    Born-digital pages are kept. For a scan, the returned page carries the
-    straightened image and a new text layer. Saving that page does not copy
-    the previous text layer.
+    Born-digital pages are kept. A scan is rebuilt from the straightened image.
+    OCR text and the visible vector text are both searchable. The vector boxes
+    move with the same turns as the image. Invisible printer text is left out.
     """
     source = pymupdf.open(document.source_path)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -231,29 +222,91 @@ def recognize(
                         source=TextSource.OCR,
                     )
                 )
-            pages.append(
-                Page(
-                    index=page.index,
-                    width=page_w,
-                    height=page_h,
-                    kind=PageKind.SCANNED,
-                    lines=tuple(text_lines),
-                    image_path=str(image_path),
-                    dpi=settings.ocr_dpi,
-                    rotation=rotation,
-                    skew=deskewed.skew,
-                    correction_label=label,
-                    source_index=page.source_index,
-                    quarter=deskewed.rotation,
-                    source_width=page.source_width or page.width,
-                    source_height=page.source_height or page.height,
-                )
+            built = Page(
+                index=page.index,
+                width=page_w,
+                height=page_h,
+                kind=PageKind.SCANNED,
+                lines=(),
+                image_path=str(image_path),
+                dpi=settings.ocr_dpi,
+                rotation=rotation,
+                skew=deskewed.skew,
+                correction_label=label,
+                source_index=page.source_index,
+                quarter=deskewed.rotation,
+                source_width=page.source_width or page.width,
+                source_height=page.source_height or page.height,
             )
+            text_lines.extend(_moved_visible_lines(source[page.source_index], page, built))
+            pages.append(replace(built, lines=tuple(text_lines)))
             if on_page:
                 on_page(done + 1, total, label)
         return Document(source_path=document.source_path, pages=tuple(pages))
     finally:
         source.close()
+
+
+def _span_visible(span: dict) -> bool:
+    alpha = span.get("alpha")
+    if alpha is None:
+        return True
+    return int(alpha) > _VISIBLE_ALPHA
+
+
+def _moved_visible_lines(pdf_page: pymupdf.Page, old: Page, new: Page) -> list[TextLine]:
+    """Visible type, in the same place as the straightened image.
+
+    ``get_text`` boxes are in unrotated user space. The render is the page
+    after ``/Rotate``, so the boxes are turned first, then moved with the
+    deskew. Lines already produced by OCR are not copied again.
+    """
+    origin = Page(
+        index=old.index,
+        width=old.source_width or old.width,
+        height=old.source_height or old.height,
+        kind=PageKind.SCANNED,
+        lines=(),
+        source_width=old.source_width or old.width,
+        source_height=old.source_height or old.height,
+    )
+    matrix = pdf_page.rotation_matrix
+    moved: list[TextLine] = []
+    for line in extract_lines(pdf_page, old.index):
+        if not line.visible:
+            continue
+        chars = tuple(map_page_rect(origin, new, _apply_matrix(char, matrix)) for char in line.chars)
+        if chars:
+            bbox = chars[0]
+            for char in chars[1:]:
+                bbox = bbox.union(char)
+        else:
+            bbox = map_page_rect(origin, new, _apply_matrix(line.bbox, matrix))
+        if bbox.width < 0.5 or bbox.height < 0.5:
+            continue
+        moved.append(
+            TextLine(
+                id=f"p{old.index}v{len(moved)}",
+                page_index=old.index,
+                text=line.text,
+                bbox=bbox,
+                confidence=1.0,
+                source=TextSource.NATIVE,
+                chars=chars,
+                visible=True,
+            )
+        )
+    return moved
+
+
+def _apply_matrix(rect: Rect, matrix: pymupdf.Matrix) -> Rect:
+    def point(x: float, y: float) -> tuple[float, float]:
+        return (matrix.a * x + matrix.c * y + matrix.e, matrix.b * x + matrix.d * y + matrix.f)
+
+    corners = (point(rect.x0, rect.y0), point(rect.x1, rect.y0), point(rect.x0, rect.y1), point(rect.x1, rect.y1))
+    xs = [item[0] for item in corners]
+    ys = [item[1] for item in corners]
+    return Rect(min(xs), min(ys), max(xs), max(ys))
 
 
 def _quad_to_rect(quad, image_w: int, image_h: int, page_w: float, page_h: float) -> Rect:

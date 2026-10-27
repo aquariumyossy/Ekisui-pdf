@@ -118,7 +118,7 @@ def test_tiled_scan_with_an_invisible_layer_is_scanned(tmp_path) -> None:
     assert opened.pages[0].kind == PageKind.SCANNED
 
 
-def test_visible_text_with_a_large_figure_stays_native(tmp_path) -> None:
+def test_visible_text_with_a_large_figure_is_still_scanned(tmp_path) -> None:
     path = tmp_path / "chart.pdf"
     image = Image.new("RGB", (800, 900), (220, 220, 220))
     doc = pymupdf.open()
@@ -132,8 +132,8 @@ def test_visible_text_with_a_large_figure_stays_native(tmp_path) -> None:
     doc.close()
 
     opened = open_document(path)
-    assert opened.pages[0].kind == PageKind.NATIVE
-    assert any("山田太郎" in line.text for line in opened.pages[0].lines)
+    assert opened.pages[0].kind == PageKind.SCANNED
+    assert any("山田太郎" in line.text and line.visible for line in opened.pages[0].lines)
 
 
 def test_stretched_speck_is_not_a_scan(tmp_path) -> None:
@@ -161,7 +161,7 @@ def test_blank_page_without_an_image_stays_native(tmp_path) -> None:
     assert open_document(path).pages[0].kind == PageKind.NATIVE
 
 
-def test_visible_name_on_a_full_page_image_stays_native(tmp_path) -> None:
+def test_visible_name_on_a_full_page_image_is_scanned(tmp_path) -> None:
     path = tmp_path / "letterhead.pdf"
     image = Image.new("RGB", (900, 1200), (230, 230, 230))
     doc = pymupdf.open()
@@ -174,11 +174,11 @@ def test_visible_name_on_a_full_page_image_stays_native(tmp_path) -> None:
     doc.close()
 
     opened = open_document(path)
-    assert opened.pages[0].kind == PageKind.NATIVE
-    assert any("山田太郎" in line.text for line in opened.pages[0].lines)
+    assert opened.pages[0].kind == PageKind.SCANNED
+    assert any("山田太郎" in line.text and line.visible for line in opened.pages[0].lines)
 
 
-def test_short_caption_over_a_large_figure_stays_native(tmp_path) -> None:
+def test_short_caption_over_a_large_figure_is_scanned(tmp_path) -> None:
     path = tmp_path / "caption.pdf"
     image = Image.new("RGB", (800, 900), (180, 180, 200))
     doc = pymupdf.open()
@@ -189,7 +189,9 @@ def test_short_caption_over_a_large_figure_stays_native(tmp_path) -> None:
     page.insert_image(pymupdf.Rect(0, 160, 595, 842), stream=buffer.getvalue())
     doc.save(path)
     doc.close()
-    assert open_document(path).pages[0].kind == PageKind.NATIVE
+    opened = open_document(path)
+    assert opened.pages[0].kind == PageKind.SCANNED
+    assert any("別紙" in line.text and line.visible for line in opened.pages[0].lines)
 
 
 def test_invisible_opacity_on_a_scan_is_still_scanned(tmp_path) -> None:

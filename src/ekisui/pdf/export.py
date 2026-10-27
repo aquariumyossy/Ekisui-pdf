@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pymupdf
 
+from ekisui.domain.index import _cells, _char_weight
 from ekisui.domain.session import TermGroup
 from ekisui.domain.tableio import groups_to_csv
 from ekisui.domain.types import Action, Document, Page, PageKind, Rect, SaveOptions, Settings, TextLine
@@ -206,7 +207,8 @@ def _add_page(output: pymupdf.Document, source: pymupdf.Document, page: Page) ->
     if page.kind == PageKind.SCANNED:
         if not page.image_path:
             raise EkisuiError("スキャンのページが残っています。OCR実行してから保存してください。")
-        # A new page, so a printer's old invisible text is not copied across.
+        # A new page. Invisible printer text is not copied. Visible vector text
+        # is already in page.lines, moved with the image, and written below.
         pdf_page = output.new_page(width=page.width, height=page.height)
         pdf_page.insert_image(pdf_page.rect, filename=page.image_path)
         _write_text_layer(pdf_page, page.lines)
@@ -222,28 +224,34 @@ def _add_page(output: pymupdf.Document, source: pymupdf.Document, page: Page) ->
 
 
 def _write_text_layer(page: pymupdf.Page, lines: tuple[TextLine, ...]) -> None:
+    """One glyph per search cell, so a redaction slice removes exactly those glyphs.
+
+    OCR lines have no character boxes. Search splits them with ``_cells``.
+    Writing the whole line into one text box left-aligns the glyphs, and a
+    name in the middle of the line then sits outside its redaction rectangle.
+    """
     for line in lines:
-        text = line.text.strip()
-        if not text:
+        if not line.text.strip():
             continue
-        rect = pymupdf.Rect(line.bbox.x0, line.bbox.y0, max(line.bbox.x1, line.bbox.x0 + 8), line.bbox.y1)
-        fontsize = max(6.0, min(line.bbox.height * 0.8, 16.0))
-        written = page.insert_textbox(
-            rect,
-            line.text,
-            fontsize=fontsize,
-            fontname="japan",
-            render_mode=3,
-            align=pymupdf.TEXT_ALIGN_LEFT,
-        )
-        if written < 0:
-            page.insert_text(
-                (line.bbox.x0, line.bbox.y1 - 1),
-                line.text,
-                fontsize=fontsize,
-                fontname="japan",
-                render_mode=3,
-            )
+        for glyph, cell in zip(line.text, _cells(line)):
+            if glyph.isspace():
+                continue
+            _write_invisible(page, cell, glyph)
+
+
+def _write_invisible(page: pymupdf.Page, rect: Rect, text: str) -> None:
+    """One invisible glyph inside ``rect``.
+
+    A whole-line ``insert_text`` runs past the end of the box. One glyph, sized
+    to the cell, stays in the cell that search redacts.
+    """
+    if rect.width < 0.8 or rect.height < 0.8 or not text:
+        return
+    fontsize = min(rect.height * 0.72, rect.width / (max(_char_weight(text[:1]), 0.2) * 1.05), 16.0)
+    if fontsize < 2.0:
+        return
+    baseline = rect.y0 + min(rect.height * 0.82, fontsize)
+    page.insert_text((rect.x0, baseline), text, fontsize=fontsize, fontname="japan", render_mode=3)
 
 
 def _redact_page(page: pymupdf.Page, boxes: list[RedactionBox]) -> None:

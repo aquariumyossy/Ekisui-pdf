@@ -175,6 +175,9 @@ class TextLine:
     confidence: float
     source: TextSource
     chars: tuple[Rect, ...] = ()
+    # False for a printer's invisible text. Those lines are not copied onto the
+    # page we save after OCR.
+    visible: bool = True
 
 
 @dataclass(frozen=True)

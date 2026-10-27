@@ -152,8 +152,8 @@ def test_scanned_redaction_removes_text_and_pixels(tmp_path):
     result = export_pdf(document, [company], dest, options, Settings())
     assert hashlib.sha256(Path(document.source_path).read_bytes()).hexdigest() == digest
     saved = pymupdf.open(dest)
-    page0 = saved[0].get_text()
-    page1 = saved[1].get_text()
+    page0 = "".join(saved[0].get_text().split())
+    page1 = "".join(saved[1].get_text().split())
     assert "会社A" in page0
     assert "会社A" in page1
     assert "株式会社サンプル商事" not in page0

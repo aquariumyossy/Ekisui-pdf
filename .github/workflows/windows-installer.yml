@@ -1,0 +1,60 @@
+name: Windows installer
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        shell: bash
+        run: pip install -e ".[dev]" pyinstaller
+      - name: Fetch OCR models
+        shell: bash
+        run: python scripts/fetch_models.py
+      - name: OCR speed
+        shell: bash
+        run: python scripts/bench_ocr.py
+      - name: Build app
+        shell: bash
+        run: pyinstaller packaging/ekisui-pdf.spec --noconfirm --clean
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "ISCC not found" }
+          & $iscc installer\ekisui-pdf.iss
+      - name: Hash and size
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem dist-installer\*.exe | Select-Object -First 1
+          if (-not $exe) { throw "installer missing" }
+          $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          $mb = [math]::Round($exe.Length / 1MB, 1)
+          @(
+            "$($exe.Name)",
+            "bytes: $($exe.Length)",
+            "mebibytes: $mb",
+            "sha256: $hash"
+          ) | Set-Content -Encoding utf8 dist-installer\SHA256SUMS.txt
+          Get-Content dist-installer\SHA256SUMS.txt
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### Installer"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- name: ``$($exe.Name)``"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- bytes: $($exe.Length) ($mb MiB)"
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "- sha256: ``$hash``"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ekisui-pdf-windows-installer
+          path: |
+            dist-installer/*.exe
+            dist-installer/SHA256SUMS.txt
+          if-no-files-found: error

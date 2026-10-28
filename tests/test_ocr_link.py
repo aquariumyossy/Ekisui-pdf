@@ -89,6 +89,24 @@ def test_confirm_stays_blocked_until_the_correction_is_reviewed(tmp_path, monkey
     app.processEvents()
 
 
+def test_new_label_keeps_both_the_old_box_and_the_corrected_reading():
+    session = Session(document_from_lines([["鈴木太郎は出席した"]]), Settings())
+    added = session.add_phrase("鈴木太郎")
+    assert added is not None
+    box = added.hits[0].hit.bbox
+    session.correct_line(session.document.pages[0].lines[0].id, "佐藤花子は出席した")
+    flower = next(group for group in session.groups if "佐藤花子" in group.canonical)
+    assert flower.hits
+    assert flower.hits[0].included is False
+    assert flower.hits[0].needs_review is True
+    kept = next(hit for group in session.groups for hit in group.hits if "鈴木" in hit.hit.surface)
+    assert kept.hit.bbox == box
+    assert kept.needs_review is True
+    assert kept.prior_surface == "鈴木太郎"
+    assert kept.corrected_surface == "佐藤花子"
+    assert "出席" not in kept.prior_surface
+
+
 def test_leftover_check_searches_the_original_ocr_string(tmp_path):
     path = tmp_path / "ocr.pdf"
     document = pymupdf.open()

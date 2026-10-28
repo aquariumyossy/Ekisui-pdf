@@ -211,9 +211,12 @@ class Session:
                     origin="auto",
                     include_fuzzy=False,
                     action=auto.action,
+                    overlap="surface",
                 )
             else:
                 self._append_hits(group, flagged, include_fuzzy=False, included=False, overlap="surface")
+        self.groups = [group for group in self.groups if group.hits]
+        original = next((tracked.prior_surface or tracked.hit.surface for tracked in kept if tracked.hit.surface), "")
         new_surfaces = []
         for group in self.groups:
             for tracked in group.hits:
@@ -222,13 +225,12 @@ class Session:
                 tracked.included = False
                 tracked.needs_review = True
                 tracked.ocr_changed = True
-                tracked.prior_surface = tracked.prior_surface or old_text
+                tracked.prior_surface = original or tracked.hit.surface
                 tracked.corrected_surface = tracked.hit.surface
                 new_surfaces.append(tracked.hit.surface)
-        corrected = new_surfaces[0] if new_surfaces else line.text
         for tracked in kept:
-            if not tracked.corrected_surface:
-                tracked.corrected_surface = corrected
+            if new_surfaces:
+                tracked.corrected_surface = new_surfaces[-1]
 
     def _suggest_line(self, line: TextLine):
         from ekisui.domain.candidates import suggest
@@ -265,6 +267,11 @@ class Session:
 
     def rescan(self) -> None:
         manual = [group for group in self.groups if group.origin in {"search", "region", "table"}]
+        sticky = [
+            (group, [hit for hit in group.hits if hit.ocr_changed])
+            for group in self.groups
+            if any(hit.ocr_changed for hit in group.hits)
+        ]
         self.groups = []
         self._index = None
         self.suggest()
@@ -296,6 +303,23 @@ class Session:
                     continue
                 extra = search_pages(self.index(), old.hit.surface, self.settings, self.table)
                 self._append_hits(revived, extra, include_fuzzy=True, included=old.included)
+        for group, hits in sticky:
+            target = self._group_for_normalized(group.canonical, group.category)
+            if target is None:
+                target = self._add_group(
+                    group.category,
+                    group.canonical,
+                    [],
+                    origin=group.origin,
+                    action=group.action,
+                    pseudonym=group.pseudonym,
+                    overlap="surface",
+                )
+            for tracked in hits:
+                if _occupied(self.groups, target, tracked.hit, "surface"):
+                    continue
+                target.hits.append(tracked)
+        self.groups = [group for group in self.groups if group.hits]
         self.confirmed = False
 
     def rebind_after_ocr(self, previous: Document) -> None:
@@ -475,7 +499,7 @@ class Session:
 
     def exclude_unchecked(self) -> None:
         for group in self.groups:
-            group.hits = [hit for hit in group.hits if hit.included]
+            group.hits = [hit for hit in group.hits if hit.included or hit.needs_review]
         self.groups = [group for group in self.groups if group.hits]
         self.confirmed = False
 
@@ -492,6 +516,8 @@ class Session:
 
     def commit_redactions(self, work_dir: str | Path, align_box_width: bool) -> None:
         """Burn every checked hit into the working PDF. This cannot be undone."""
+        if self.unreviewed_ocr():
+            raise EkisuiError("OCR修正で変わった候補が未確認です。一覧の「要確認」を確認してから確定してください。")
         pending: list[TermGroup] = []
         for group in self.groups:
             included = [hit for hit in group.hits if hit.included]
@@ -571,6 +597,7 @@ class Session:
         include_fuzzy: bool = False,
         action: Action | None = None,
         pseudonym: str | None = None,
+        overlap: str = "place",
     ) -> TermGroup:
         chosen = action or DEFAULT_ACTION[category]
         name = pseudonym or (self._pinned_pseudonym(canonical, category) if chosen == Action.REPLACE else None)
@@ -585,7 +612,12 @@ class Session:
             origin=origin,
         )
         self.groups.append(group)
-        self._append_hits(group, hits, include_fuzzy=include_fuzzy or origin != "auto")
+        self._append_hits(
+            group,
+            hits,
+            include_fuzzy=include_fuzzy or origin != "auto",
+            overlap=overlap,
+        )
         return group
 
     def _append_hits(

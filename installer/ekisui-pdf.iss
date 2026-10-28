@@ -1,4 +1,4 @@
-; Per-user, unsigned installer. Start menu entry and uninstall via Windows settings.
+﻿; Per-user, unsigned installer. Start menu entry and uninstall via Windows settings.
 
 #define MyAppName "ekisui-pdf"
 #define MyAppVersion "1.0.0"
@@ -34,6 +34,13 @@ Source: "..\dist\ekisui-pdf\*"; DestDir: "{app}"; Flags: ignoreversion recursesu
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\assets\icon\ekisui.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\docs\使い方.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\docs\使い方.html"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\docs\images\01-open.png"; DestDir: "{app}\images"; Flags: ignoreversion
+Source: "..\docs\images\02-ocr.png"; DestDir: "{app}\images"; Flags: ignoreversion
+Source: "..\docs\images\03-mask.png"; DestDir: "{app}\images"; Flags: ignoreversion
+Source: "..\docs\images\04-confirm.png"; DestDir: "{app}\images"; Flags: ignoreversion
+Source: "..\docs\images\05-save.png"; DestDir: "{app}\images"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; IconFilename: "{app}\ekisui.ico"

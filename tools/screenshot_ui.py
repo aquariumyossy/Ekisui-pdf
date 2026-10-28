@@ -217,7 +217,13 @@ def main() -> None:
     grab(window, out / "09-verify-ok.png")
     window.shade.hide()
 
-    report = verify_pdf(str(demo), window.session.groups, window.session.settings, window.session.table, False)
+    report = verify_pdf(
+        str(demo),
+        [*window.session.committed, *window.session.groups],
+        window.session.settings,
+        window.session.table,
+        False,
+    )
     window.show_report(report)
     QApplication.processEvents()
     grab(window, out / "08-verify-ng.png")

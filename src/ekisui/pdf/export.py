@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pymupdf
@@ -11,8 +11,9 @@ import pymupdf
 from ekisui.domain.index import _cells, _char_weight
 from ekisui.domain.session import TermGroup
 from ekisui.domain.tableio import groups_to_csv
-from ekisui.domain.types import Action, Document, Page, PageKind, Rect, SaveOptions, Settings, TextLine
+from ekisui.domain.types import Action, Document, Page, PageKind, Rect, SaveOptions, Settings, TextLine, TextSource
 from ekisui.errors import EkisuiError
+from ekisui.pdf.document import pdf_path
 
 
 @dataclass(frozen=True)
@@ -66,12 +67,14 @@ def export_pdf(
     dest: str | Path,
     options: SaveOptions,
     settings: Settings | None = None,
+    archived: list[TermGroup] | None = None,
 ) -> ExportResult:
     settings = settings or Settings()
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    archived = archived or []
     boxes = redaction_boxes(document, groups, options, settings)
-    source = pymupdf.open(document.source_path)
+    source = pymupdf.open(pdf_path(document))
     output = pymupdf.open()
     try:
         by_page: dict[int, list[RedactionBox]] = {}
@@ -104,10 +107,11 @@ def export_pdf(
     base = dest.stem[: -len("_墨消し")] if dest.stem.endswith("_墨消し") else dest.stem
     if options.export_log:
         log_path = dest.with_name(base + "_墨消し記録.csv")
-        write_log(log_path, boxes, options.include_original_terms)
+        earlier = redaction_boxes(document, archived, options, settings)
+        write_log(log_path, [*earlier, *boxes], options.include_original_terms)
     if options.export_replacement_table:
         table_path = dest.with_name(base + "_置換表.csv")
-        table_path.write_text(groups_to_csv(groups), encoding="utf-8-sig")
+        table_path.write_text(groups_to_csv([*archived, *groups]), encoding="utf-8-sig")
     return ExportResult(str(dest), str(log_path) if log_path else None, str(table_path) if table_path else None)
 
 
@@ -302,6 +306,114 @@ def _redact_page(page: pymupdf.Page, boxes: list[RedactionBox]) -> None:
             )
         else:
             page.draw_rect(rect, color=(0, 0, 0), fill=(0, 0, 0), width=0)
+
+
+def bake_redactions(
+    document: Document,
+    groups: list[TermGroup],
+    settings: Settings,
+    work_dir: str | Path,
+    align_box_width: bool,
+) -> Document:
+    """Burn included hits into a new PDF and drop them from the text layer.
+
+    The file the user opened is not modified. Later reads use ``working_path``.
+    """
+    options = SaveOptions(
+        align_box_width=align_box_width,
+        strip_metadata=False,
+        export_log=False,
+        include_original_terms=False,
+        export_replacement_table=False,
+    )
+    boxes = redaction_boxes(document, groups, options, settings)
+    if not boxes:
+        return document
+    directory = Path(work_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    by_page: dict[int, list[RedactionBox]] = {}
+    for box in boxes:
+        by_page.setdefault(box.page_index, []).append(box)
+    source = pymupdf.open(pdf_path(document))
+    output = pymupdf.open()
+    pages: list[Page] = []
+    try:
+        for page in document.pages:
+            pdf_page = _add_page(output, source, page)
+            page_boxes = by_page.get(page.index, [])
+            _redact_page(pdf_page, page_boxes)
+            image_path = page.image_path
+            if page.kind == PageKind.SCANNED and page_boxes:
+                image_path = str(_unique_file(directory, f"baked-p{page.index}", ".png"))
+                dpi = page.dpi if page.dpi and page.dpi > 0 else 144
+                pdf_page.get_pixmap(dpi=dpi, alpha=False, colorspace=pymupdf.csRGB).save(image_path)
+            pages.append(
+                replace(
+                    page,
+                    lines=_lines_after_redaction(page, page_boxes),
+                    image_path=image_path,
+                    source_index=len(pages),
+                    source_width=page.width,
+                    source_height=page.height,
+                )
+            )
+        baked = _unique_file(directory, "session-redacted", ".pdf")
+        output.save(baked, garbage=4, deflate=True, clean=True, incremental=False)
+    finally:
+        output.close()
+        source.close()
+    return replace(document, working_path=str(baked), pages=tuple(pages))
+
+
+def _unique_file(directory: Path, stem: str, suffix: str) -> Path:
+    path = directory / f"{stem}{suffix}"
+    number = 2
+    while path.exists():
+        path = directory / f"{stem}-{number}{suffix}"
+        number += 1
+    return path
+
+
+def _lines_after_redaction(page: Page, boxes: list[RedactionBox]) -> tuple[TextLine, ...]:
+    if not boxes:
+        return page.lines
+    kept: list[TextLine] = []
+    for line in page.lines:
+        cells = _cells(line)
+        kept_chars: list[tuple[str, Rect]] = []
+        for char, cell in zip(line.text, cells):
+            if any(cell.intersects(box.rect) for box in boxes):
+                continue
+            kept_chars.append((char, cell))
+        if len(kept_chars) == len(line.text):
+            kept.append(line)
+            continue
+        text = "".join(char for char, _cell in kept_chars)
+        if not text.strip():
+            continue
+        chars = [cell for _char, cell in kept_chars]
+        bbox = chars[0]
+        for cell in chars[1:]:
+            bbox = bbox.union(cell)
+        kept.append(replace(line, text=text, bbox=bbox, chars=tuple(chars)))
+    blackouts = [box for box in boxes if box.action == Action.BLACKOUT]
+    for box in boxes:
+        if box.action != Action.REPLACE or not box.pseudonym:
+            continue
+        if _covered_by_blackout(box, blackouts):
+            continue
+        kept.append(
+            TextLine(
+                id=f"p{page.index}baked{len(kept)}",
+                page_index=page.index,
+                text=box.pseudonym,
+                bbox=box.rect,
+                confidence=1.0,
+                source=TextSource.CORRECTED,
+                visible=True,
+            )
+        )
+    return tuple(kept)
 
 
 def _covered_by_blackout(box: RedactionBox, blackouts: list[RedactionBox]) -> bool:

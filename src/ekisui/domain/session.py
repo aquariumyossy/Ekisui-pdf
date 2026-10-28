@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 from ekisui.domain.address import address_key
 from ekisui.domain.adjust import bbox_of_range, bind_span, move_edge, snap_boundary
@@ -69,6 +70,9 @@ class Session:
         self._index: tuple[PageIndex, ...] | None = None
         self._seq = 0
         self.confirmed = False
+        # Hits whose pixels and text have already been burned into the page.
+        # They are not editable and are not cleared when a new range is added.
+        self.committed: list[TermGroup] = []
 
     def index(self) -> tuple[PageIndex, ...]:
         if self._index is None:
@@ -382,23 +386,38 @@ class Session:
         self.confirmed = False
 
     def renumber(self) -> None:
-        companies = people = phrases = addresses = 0
+        for group in self.groups:
+            if group.action == Action.REPLACE:
+                group.pseudonym = None
         for group in self.groups:
             if group.action != Action.REPLACE:
                 continue
-            if group.category == Category.COMPANY:
-                group.pseudonym = company_name(companies)
-                companies += 1
-            elif group.category == Category.PERSON:
-                group.pseudonym = person_name(people)
-                people += 1
-            elif group.category == Category.ADDRESS:
-                group.pseudonym = address_name(addresses)
-                addresses += 1
-            else:
-                group.pseudonym = phrase_name(phrases)
-                phrases += 1
+            group.pseudonym = self._allocate(group.category)
         self.confirmed = False
+
+    def commit_redactions(self, work_dir: str | Path, align_box_width: bool) -> None:
+        """Burn every checked hit into the working PDF. This cannot be undone."""
+        pending: list[TermGroup] = []
+        for group in self.groups:
+            included = [hit for hit in group.hits if hit.included]
+            if included:
+                pending.append(replace(group, hits=list(included)))
+        if pending:
+            from ekisui.pdf.export import bake_redactions
+
+            self.document = bake_redactions(
+                self.document,
+                pending,
+                self.settings,
+                work_dir,
+                align_box_width,
+            )
+            self._index = None
+        for group in self.groups:
+            group.hits = [hit for hit in group.hits if not hit.included]
+        self.groups = [group for group in self.groups if group.hits]
+        self.committed.extend(pending)
+        self.confirmed = True
 
     def import_rows(self, rows: list[tuple[str, str, str, str]]) -> None:
         """Rows are (category label, canonical, pseudonym, variants joined by |)."""
@@ -490,7 +509,7 @@ class Session:
         return None
 
     def _allocate(self, category: Category) -> str:
-        used = {group.pseudonym for group in self.groups if group.pseudonym}
+        used = {group.pseudonym for group in (*self.groups, *self.committed) if group.pseudonym}
         index = 0
         while True:
             if category == Category.COMPANY:

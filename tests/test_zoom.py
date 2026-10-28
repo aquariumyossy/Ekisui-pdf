@@ -1,6 +1,6 @@
 """Ctrl+wheel and pinch keep the page point under the cursor."""
 
-from ekisui.gui.zoom import anchored_scroll, clamp_zoom
+from ekisui.gui.zoom import anchored_scroll, clamp_zoom, page_at_scroll, scroll_to_keep_point, stack_offsets
 
 
 def test_clamp():
@@ -29,6 +29,22 @@ def test_anchor_stays_under_the_cursor():
     again_y = (80 + scroll_y - 18) / zoom
     assert again_x == page_x
     assert again_y == page_y
+
+
+def test_stack_centers_a_narrow_page_and_scroll_crosses_the_gap():
+    placed = stack_offsets([(200, 400), (100, 300)], gap=16)
+    assert placed[0] == (0, 0)
+    assert placed[1] == (50, 416)
+    spans = [(y, height) for (_x, y), (_w, height) in zip(placed, [(200, 400), (100, 300)])]
+    assert page_at_scroll(spans, 0, 180, gap=16) == 0
+    assert page_at_scroll(spans, 360, 180, gap=16) == 1
+
+
+def test_scroll_keeps_a_point_on_a_lower_page():
+    page_x, page_y = 40.0, 25.0
+    scroll_x, scroll_y = scroll_to_keep_point(page_x, page_y, 2.0, 30.0, 50.0, 10.0, 500.0)
+    assert scroll_x == 10.0 + 40.0 * 2.0 - 30.0
+    assert scroll_y == 500.0 + 25.0 * 2.0 - 50.0
 
 
 def test_anchor_respects_the_zoom_limit():

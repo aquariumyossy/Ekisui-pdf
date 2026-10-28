@@ -5,11 +5,36 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QLineEdit, QMenu, QPushButton, QScrollArea, QToolTip, QWidget
 
 from ekisui.domain.types import Action, MatchKind, Rect, TextLine
+from ekisui.gui.zoom import page_at_scroll, stack_offsets
 
 _HANDLE = 8.0
+_PAGE_PAD = 18
+_PAGE_GAP = 16
 _LEFT_TIP = "左にドラッグすると範囲の先頭を1文字ずつ動かします。"
 _RIGHT_TIP = "右にドラッグすると範囲の末尾を1文字ずつ動かします。"
 _MARKER_TIP = "手動で範囲を調整しました。"
+
+
+def _turn_wheel(view: "PageView", event) -> bool:
+    """Scroll the stacked pages, or zoom when Ctrl is held. The page is the widget under the cursor, so the scroll area never sees the event itself."""
+    if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+        delta = event.angleDelta().y() or event.pixelDelta().y()
+        if delta:
+            factor = 1.15 if delta > 0 else 1 / 1.15
+            pos = view.viewport().mapFromGlobal(event.globalPosition().toPoint())
+            view.zoomRequested.emit(factor, QPointF(pos), True)
+        event.accept()
+        return True
+    pixel = event.pixelDelta()
+    if pixel.isNull():
+        angle = event.angleDelta()
+        pixel = QPoint(int(round(angle.x() / 120 * 48)), int(round(angle.y() / 120 * 48)))
+    if pixel.isNull():
+        return False
+    view.horizontalScrollBar().setValue(view.horizontalScrollBar().value() - pixel.x())
+    view.verticalScrollBar().setValue(view.verticalScrollBar().value() - pixel.y())
+    event.accept()
+    return True
 
 
 def place_inline_editor(
@@ -71,7 +96,7 @@ def place_inline_editor(
 
 
 class PageCanvas(QWidget):
-    regionChosen = Signal(object)
+    regionChosen = Signal(int, object)
     lineActivated = Signal(str)
     editConfirmed = Signal(str, str)
     editCancelled = Signal()
@@ -79,8 +104,8 @@ class PageCanvas(QWidget):
     hitRestore = Signal(str)
     hitSelected = Signal(str)
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
         self.setObjectName("canvasHost")
         self.pixmap: QPixmap | None = None
         self.page_w = 595.0
@@ -93,6 +118,7 @@ class PageCanvas(QWidget):
         self.show_lines = False
         self.show_boxes = False
         self.region_mode = False
+        self.page_index = 0
         self.selected_hit = ""
         self.review_below = 0.80
         self._origin = QPoint(0, 0)
@@ -125,12 +151,15 @@ class PageCanvas(QWidget):
         self._relayout()
 
     def _relayout(self) -> None:
-        width = max(1, int(self.page_w * self.zoom))
-        height = max(1, int(self.page_h * self.zoom))
-        self.setMinimumSize(width + 36, height + 36)
-        self.resize(width + 36, height + 36)
-        self._origin = QPoint(18, 18)
+        width = max(1, int(self.page_w * self.zoom)) + _PAGE_PAD * 2
+        height = max(1, int(self.page_h * self.zoom)) + _PAGE_PAD * 2
+        self.setMinimumSize(width, height)
+        self.resize(width, height)
+        self._origin = QPoint(_PAGE_PAD, _PAGE_PAD)
         self.update()
+        parent = self.parentWidget()
+        if isinstance(parent, PageColumn) and not parent._in_layout:
+            parent.relayout()
 
     def page_point(self, pos) -> tuple[float, float]:
         return (
@@ -209,6 +238,12 @@ class PageCanvas(QWidget):
             return
         super().keyPressEvent(event)
 
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        view = self._scroll_area()
+        if isinstance(view, PageView) and _turn_wheel(view, event):
+            return
+        super().wheelEvent(event)
+
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.RightButton:
             self._popup(event)
@@ -261,7 +296,7 @@ class PageCanvas(QWidget):
         self._rubber = None
         self.update()
         if rect.width() > 4 and rect.height() > 4:
-            self.regionChosen.emit(Rect(rect.x(), rect.y(), rect.right(), rect.bottom()))
+            self.regionChosen.emit(self.page_index, Rect(rect.x(), rect.y(), rect.right(), rect.bottom()))
 
     def _popup(self, event) -> None:
         x, y = self.page_point(event.position())
@@ -382,19 +417,104 @@ class PageCanvas(QWidget):
         painter.end()
 
 
+class PageColumn(QWidget):
+    """Pages stacked with a gap, so the wheel scrolls from one page into the next."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.canvases: list[PageCanvas] = []
+        self._in_layout = False
+
+    def adopt(self, canvas: PageCanvas) -> None:
+        canvas.setParent(self)
+        canvas.page_index = 0
+        self.canvases = [canvas]
+        self.relayout()
+
+    def set_count(self, count: int) -> None:
+        while len(self.canvases) < count:
+            canvas = PageCanvas(self)
+            canvas.page_index = len(self.canvases)
+            self.canvases.append(canvas)
+        while len(self.canvases) > count:
+            canvas = self.canvases.pop()
+            canvas.hide()
+            canvas.setParent(None)
+            canvas.deleteLater()
+        for index, canvas in enumerate(self.canvases):
+            canvas.page_index = index
+            canvas.show()
+        self.relayout()
+
+    def relayout(self) -> None:
+        self._in_layout = True
+        try:
+            sizes = [(canvas.width(), canvas.height()) for canvas in self.canvases]
+            placed = stack_offsets(sizes, _PAGE_GAP)
+            width = 1
+            bottom = 1
+            for canvas, (x, y) in zip(self.canvases, placed):
+                canvas.move(x, y)
+                width = max(width, x + canvas.width())
+                bottom = y + canvas.height()
+            self.resize(max(1, width), max(1, bottom))
+        finally:
+            self._in_layout = False
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        parent = self.parent()
+        while parent is not None and not isinstance(parent, PageView):
+            parent = parent.parent()
+        if isinstance(parent, PageView) and _turn_wheel(parent, event):
+            return
+        super().wheelEvent(event)
+
+
 class PageView(QScrollArea):
     zoomRequested = Signal(float, QPointF, bool)
+    pageScrolled = Signal(int)
 
-    def __init__(self, canvas: PageCanvas) -> None:
+    def __init__(self, canvas: PageCanvas | None = None) -> None:
         super().__init__()
-        self.setWidget(canvas)
+        self.column = PageColumn()
+        self.setWidget(self.column)
         self.setWidgetResizable(False)
         self.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         self.setStyleSheet("QScrollArea { background: #d9dbde; border: none; }")
         self.viewport().installEventFilter(self)
         self.viewport().grabGesture(Qt.GestureType.PinchGesture)
-        self.horizontalScrollBar().valueChanged.connect(canvas.reposition_edit)
-        self.verticalScrollBar().valueChanged.connect(canvas.reposition_edit)
+        self._lock = False
+        self.horizontalScrollBar().valueChanged.connect(self._reposition_edits)
+        self.verticalScrollBar().valueChanged.connect(self._reposition_edits)
+        self.verticalScrollBar().valueChanged.connect(self._emit_page)
+        if canvas is not None:
+            self.column.adopt(canvas)
+
+    def ensure_pages(self, count: int) -> list[PageCanvas]:
+        if len(self.column.canvases) != count:
+            self.column.set_count(count)
+        return self.column.canvases
+
+    def canvas_for(self, index: int) -> PageCanvas:
+        return self.column.canvases[index]
+
+    def scroll_to_page(self, index: int) -> None:
+        if index < 0 or index >= len(self.column.canvases):
+            return
+        self._lock = True
+        self.verticalScrollBar().setValue(self.column.canvases[index].y())
+        self._lock = False
+
+    def _reposition_edits(self, *_args) -> None:
+        for canvas in self.column.canvases:
+            canvas.reposition_edit()
+
+    def _emit_page(self, *_args) -> None:
+        if self._lock or not self.column.canvases:
+            return
+        spans = [(canvas.y(), canvas.height()) for canvas in self.column.canvases]
+        index = page_at_scroll(spans, self.verticalScrollBar().value(), self.viewport().height(), _PAGE_GAP)
+        self.pageScrolled.emit(index)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)

@@ -52,6 +52,11 @@ _MIN_IMAGE_PIXELS = 4_000
 _VISIBLE_ALPHA = 13
 
 
+def pdf_path(document: Document) -> str:
+    """File the pixels and text are read from. The opened file stays untouched."""
+    return document.working_path or document.source_path
+
+
 def pages_need_ocr(document: Document) -> bool:
     """Scanned pages still waiting for a straightened image."""
     return any(page.kind == PageKind.SCANNED and not page.image_path for page in document.pages)
@@ -191,7 +196,7 @@ def recognize(
     OCR text and the visible vector text are both searchable. The vector boxes
     move with the same turns as the image. Invisible printer text is left out.
     """
-    source = pymupdf.open(document.source_path)
+    source = pymupdf.open(pdf_path(document))
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
         pages: list[Page] = []
@@ -247,7 +252,11 @@ def recognize(
             pages.append(replace(built, lines=tuple(text_lines)))
             if on_page:
                 on_page(done + 1, total, label)
-        return Document(source_path=document.source_path, pages=tuple(pages))
+        return Document(
+            source_path=document.source_path,
+            pages=tuple(pages),
+            working_path=document.working_path,
+        )
     finally:
         source.close()
 

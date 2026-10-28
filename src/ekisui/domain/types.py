@@ -204,6 +204,10 @@ class Page:
 class Document:
     source_path: str
     pages: tuple[Page, ...]
+    # PDF bytes the view, OCR, and save read. Empty until a confirmation
+    # burns redactions into a temp file. ``source_path`` stays the name the
+    # user opened, and that file is never modified.
+    working_path: str | None = None
 
     def page(self, index: int) -> Page:
         return self.pages[index]

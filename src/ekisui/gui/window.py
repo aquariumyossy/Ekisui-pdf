@@ -46,9 +46,9 @@ from ekisui.domain.types import (
 )
 from ekisui.errors import EkisuiError
 from ekisui.gui.pageview import PageCanvas, PageView
-from ekisui.gui.zoom import anchored_scroll
+from ekisui.gui.zoom import scroll_to_keep_point
 from ekisui.gui.panels import CandidatePanel, OcrPanel, TablePanel
-from ekisui.pdf.document import open_document, pages_need_ocr, recognize
+from ekisui.pdf.document import open_document, pages_need_ocr, pdf_path, recognize
 from ekisui.pdf.export import export_pdf, redaction_boxes, unique_destination
 from ekisui.pdf.ocr_engine import PpOcrV5
 from ekisui.pdf.verify import VerifyReport, verify_pdf
@@ -112,6 +112,8 @@ class MainWindow(QMainWindow):
         self.work_dir = Path(tempfile.mkdtemp(prefix="ekisui-"))
         self.live_labels: dict[int, str | None] = {}
         self._pixmap_cache: dict[tuple, QPixmap] = {}
+        self._scroll_target: int | None = None
+        self._thumb_buttons: list[QPushButton] = []
         self.store = QSettings("ekisui", "ekisui-pdf")
         self._build()
         self._shortcuts()
@@ -142,15 +144,9 @@ class MainWindow(QMainWindow):
         viewer_box.setContentsMargins(0, 0, 0, 0)
         viewer_box.setSpacing(0)
         viewer_box.addWidget(self._viewer_bar())
-        self.canvas = PageCanvas()
-        self.canvas.regionChosen.connect(self._on_region)
-        self.canvas.lineActivated.connect(self._edit_line)
-        self.canvas.editConfirmed.connect(self._commit_line)
-        self.canvas.hitAdjusted.connect(self._on_adjust)
-        self.canvas.hitRestore.connect(self._on_restore)
-        self.canvas.hitSelected.connect(self._select_hit)
-        self.view = PageView(self.canvas)
+        self.view = PageView()
         self.view.zoomRequested.connect(self._zoom_at)
+        self.view.pageScrolled.connect(self._on_scrolled_page)
         viewer_box.addWidget(self.view, 1)
         self.side = QWidget()
         self.side.setObjectName("side")
@@ -529,8 +525,28 @@ class MainWindow(QMainWindow):
         else:
             self.ocr_label.setText("")
 
+    @property
+    def canvas(self) -> PageCanvas | None:
+        canvases = self.view.column.canvases
+        if not canvases:
+            return None
+        index = min(max(self.page_index, 0), len(canvases) - 1)
+        return canvases[index]
+
+    def _wire_canvas(self, canvas: PageCanvas) -> None:
+        if getattr(canvas, "_wired", False):
+            return
+        canvas._wired = True
+        canvas.regionChosen.connect(self._on_region)
+        canvas.lineActivated.connect(self._edit_line)
+        canvas.editConfirmed.connect(self._commit_line)
+        canvas.hitAdjusted.connect(self._on_adjust)
+        canvas.hitRestore.connect(self._on_restore)
+        canvas.hitSelected.connect(self._select_hit)
+
     def _fill_thumbs(self) -> None:
         assert self.session
+        self._thumb_buttons = []
         while self.thumb_layout.count() > 1:
             item = self.thumb_layout.takeAt(0)
             if item.widget():
@@ -560,6 +576,7 @@ class MainWindow(QMainWindow):
             else:
                 button.setStyleSheet("border: 1px solid #cfcfcf; padding: 0;")
             button.clicked.connect(lambda _c=False, index=page.index: self._goto(index))
+            self._thumb_buttons.append(button)
             column.addWidget(button, alignment=Qt.AlignmentFlag.AlignHCenter)
             caption = str(page.index + 1)
             if counts.get(page.index):
@@ -579,25 +596,46 @@ class MainWindow(QMainWindow):
 
     def _show_page(self) -> None:
         assert self.session
-        page = self.session.document.pages[self.page_index]
-        self.page_label.setText(f"{self.page_index + 1} / {len(self.session.document.pages)}")
+        document = self.session.document
+        self.page_label.setText(f"{self.page_index + 1} / {len(document.pages)}")
         self.zoom_label.setText(f"{round(self.zoom * 100)}%")
-        pixmap = self._page_pixmap(self.page_index)
-        self.canvas.review_below = self.session.settings.review_below
-        self.canvas.set_page(pixmap, page.width, page.height)
-        self.canvas.set_zoom(self.zoom)
-        self.canvas.region_mode = self.region_mode
-        self.canvas.show_lines = self.show_lines
-        self.canvas.show_boxes = self.preview
-        self.canvas.show_hits = not self.preview
-        self.canvas.selected_hit = self.selected_hit
-        self.canvas.hits = []
-        self.canvas.lines = list(page.lines)
+        self.view._lock = True
+        try:
+            canvases = self.view.ensure_pages(len(document.pages))
+            for canvas in canvases:
+                self._wire_canvas(canvas)
+            boxes = redaction_boxes(
+                document,
+                self.session.groups,
+                SaveOptions(align_box_width=self.align_boxes),
+                self.session.settings,
+            )
+            for page, canvas in zip(document.pages, canvases):
+                self._fill_canvas(canvas, page, boxes)
+        finally:
+            self.view._lock = False
+        if self._scroll_target is not None:
+            self.view.scroll_to_page(self._scroll_target)
+            self._scroll_target = None
+
+    def _fill_canvas(self, canvas: PageCanvas, page, boxes) -> None:
+        assert self.session
+        pixmap = self._page_pixmap(page.index)
+        canvas.review_below = self.session.settings.review_below
+        canvas.set_zoom(self.zoom)
+        canvas.set_page(pixmap, page.width, page.height)
+        canvas.region_mode = self.region_mode
+        canvas.show_lines = self.show_lines
+        canvas.show_boxes = self.preview
+        canvas.show_hits = not self.preview
+        canvas.selected_hit = self.selected_hit
+        canvas.hits = []
+        canvas.lines = list(page.lines)
         for group in self.session.groups:
             for tracked in group.included_hits():
                 if tracked.hit.page_index != page.index:
                     continue
-                self.canvas.hits.append(
+                canvas.hits.append(
                     {
                         "id": tracked.id,
                         "bbox": tracked.hit.bbox,
@@ -606,13 +644,7 @@ class MainWindow(QMainWindow):
                         "line_ids": tracked.hit.line_ids,
                     }
                 )
-        boxes = redaction_boxes(
-            self.session.document,
-            self.session.groups,
-            SaveOptions(align_box_width=self.align_boxes),
-            self.session.settings,
-        )
-        self.canvas.boxes = [
+        canvas.boxes = [
             {
                 "rect": box.rect,
                 "action": box.action,
@@ -621,31 +653,49 @@ class MainWindow(QMainWindow):
             for box in boxes
             if box.page_index == page.index
         ]
-        self.canvas.update()
+        canvas.update()
+
+    def _on_scrolled_page(self, index: int) -> None:
+        if not self.session or index == self.page_index:
+            return
+        self.page_index = index
+        self.page_label.setText(f"{self.page_index + 1} / {len(self.session.document.pages)}")
+        self._mark_thumbs()
+        if self.zoom > 1.15:
+            self._rerender_current()
+
+    def _mark_thumbs(self) -> None:
+        for index, button in enumerate(self._thumb_buttons):
+            current = index == self.page_index
+            button.setChecked(current)
+            if current:
+                button.setStyleSheet("border: 2px solid #0f6cbd; padding: 0;")
+            else:
+                button.setStyleSheet("border: 1px solid #cfcfcf; padding: 0;")
 
     def _page_pixmap(self, index: int) -> QPixmap:
         assert self.session
         page = self.session.document.pages[index]
-        key = ("page", index, page.image_path, page.width, page.height)
+        key = ("page", index, page.image_path, pdf_path(self.session.document), page.source_index, page.width, page.height)
         if key in self._pixmap_cache:
             return self._pixmap_cache[key]
         if page.image_path and Path(page.image_path).exists():
             pixmap = QPixmap(page.image_path)
         else:
-            pixmap = _render_pdf(self.session.document.source_path, page.source_index, 110)
+            pixmap = _render_pdf(pdf_path(self.session.document), page.source_index, 110)
         self._pixmap_cache[key] = pixmap
         return pixmap
 
     def _thumb(self, index: int) -> QPixmap:
         assert self.session
         page = self.session.document.pages[index]
-        key = ("thumb", index, page.image_path)
+        key = ("thumb", index, page.image_path, pdf_path(self.session.document), page.source_index)
         if key in self._pixmap_cache:
             return self._pixmap_cache[key]
         if page.image_path and Path(page.image_path).exists():
             pixmap = QPixmap(page.image_path).scaledToWidth(84, Qt.TransformationMode.SmoothTransformation)
         else:
-            pixmap = _render_pdf(self.session.document.source_path, page.source_index, 24)
+            pixmap = _render_pdf(pdf_path(self.session.document), page.source_index, 24)
         self._pixmap_cache[key] = pixmap
         return pixmap
 
@@ -757,7 +807,8 @@ class MainWindow(QMainWindow):
     def _toggle_region(self) -> None:
         self.region_mode = self.btn_region.isChecked()
         if self.session:
-            self.canvas.region_mode = self.region_mode
+            for canvas in self.view.column.canvases:
+                canvas.region_mode = self.region_mode
 
     def _toggle_lines(self, checked: bool) -> None:
         self.show_lines = checked
@@ -803,17 +854,17 @@ class MainWindow(QMainWindow):
     def _can_save(self) -> bool:
         if self.session is None or self.ocr_running:
             return False
-        if self.session.confirmed or self.ocr_ran:
+        if self.session.confirmed or self.ocr_ran or self.session.committed:
             return True
         return bool(self.session.groups)
 
     def _save_tip(self) -> str:
         if self.session is None or not self._can_save():
             return "読み取りもマスキングの確定もまだないので、保存できません。"
-        if self.session.confirmed:
-            return "マスキングしたPDFを別名で保存します。消し残りも確認します。"
-        if self.session.groups:
+        if self.session.groups and not self.session.confirmed:
             return "候補が未確定です。読み取ったPDFだけ保存するか、確定に進むかを選べます。"
+        if self.session.confirmed or self.session.committed:
+            return "マスキングしたPDFを別名で保存します。消し残りも確認します。"
         return "読み取った文字だけのPDFを別名で保存します。マスキングはしません。"
 
     def _on_split(self, _pos: int, _index: int) -> None:
@@ -822,7 +873,8 @@ class MainWindow(QMainWindow):
             self.store.setValue("side_width", sizes[1])
         if self.fit_mode and self.session and not self.ocr_running:
             self._fit_width()
-        self.canvas.reposition_edit()
+        if self.canvas is not None:
+            self.canvas.reposition_edit()
 
     def _on_adjust(self, hit_id: str, edge: str, page_x: float) -> None:
         if not self.session:
@@ -847,19 +899,21 @@ class MainWindow(QMainWindow):
             for tracked in group.hits:
                 if tracked.id != hit_id:
                     continue
-                for hit in self.canvas.hits:
-                    if hit["id"] == hit_id:
-                        hit["bbox"] = tracked.hit.bbox
-                        hit["adjusted"] = tracked.adjusted
+                for canvas in self.view.column.canvases:
+                    for hit in canvas.hits:
+                        if hit["id"] == hit_id:
+                            hit["bbox"] = tracked.hit.bbox
+                            hit["adjusted"] = tracked.adjusted
+                    canvas.selected_hit = hit_id
+                    canvas.update()
                 self.selected_hit = hit_id
-                self.canvas.selected_hit = hit_id
-                self.canvas.update()
                 return
 
     def _select_hit(self, hit_id: str) -> None:
         self.selected_hit = hit_id
-        self.canvas.selected_hit = hit_id
-        self.canvas.update()
+        for canvas in self.view.column.canvases:
+            canvas.selected_hit = hit_id
+            canvas.update()
 
     def _search(self, text: str) -> None:
         if not self.session:
@@ -870,10 +924,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("見つかりませんでした", 4000)
         self.refresh()
 
-    def _on_region(self, rect) -> None:
+    def _on_region(self, page_index: int, rect) -> None:
         if not self.session:
             return
-        group = self.session.add_region(self.page_index, rect)
+        self.page_index = page_index
+        group = self.session.add_region(page_index, rect)
         self.preview = False
         if group is None:
             self.statusBar().showMessage("この範囲から語句を読み取れませんでした", 4000)
@@ -939,7 +994,8 @@ class MainWindow(QMainWindow):
         path, _filter = QFileDialog.getSaveFileName(self, "置換表を保存", "置換表.csv", "CSV (*.csv)")
         if not path:
             return
-        Path(path).write_text(groups_to_csv(self.session.groups), encoding="utf-8-sig")
+        rows = [*self.session.committed, *self.session.groups]
+        Path(path).write_text(groups_to_csv(rows), encoding="utf-8-sig")
 
     def _load_table(self) -> None:
         if not self.session:
@@ -980,6 +1036,7 @@ class MainWindow(QMainWindow):
         if not self.session:
             return
         self.page_index = max(0, min(index, len(self.session.document.pages) - 1))
+        self._scroll_target = self.page_index
         self.refresh()
 
     def _move_page(self, delta: int) -> None:
@@ -1003,36 +1060,49 @@ class MainWindow(QMainWindow):
         self.zoom_label.setText(f"{round(self.zoom * 100)}%")
         if not self.session:
             return
-        self.canvas.set_zoom(self.zoom)
+        for canvas in self.view.column.canvases:
+            canvas.set_zoom(self.zoom)
         if rerender:
             self._rerender_current()
+
+    def _canvas_under(self, pos: QPointF) -> PageCanvas | None:
+        if not self.view.column.canvases:
+            return None
+        content = self.view.viewport().mapTo(self.view.column, QPoint(int(pos.x()), int(pos.y())))
+        for canvas in self.view.column.canvases:
+            if canvas.geometry().contains(content):
+                return canvas
+        return self.canvas
 
     def _zoom_at(self, factor: float, pos: QPointF, rerender: bool) -> None:
         if not self.session or factor <= 0:
             return
-        old = self.zoom
-        horizontal = self.view.horizontalScrollBar()
-        vertical = self.view.verticalScrollBar()
-        new, scroll_x, scroll_y = anchored_scroll(
-            old,
-            old * factor,
-            pos.x(),
-            pos.y(),
-            float(self.canvas._origin.x()),
-            float(self.canvas._origin.y()),
-            float(horizontal.value()),
-            float(vertical.value()),
-        )
-        if abs(new - old) < 1e-4:
+        from ekisui.gui.zoom import clamp_zoom
+
+        canvas = self._canvas_under(pos) or self.canvas
+        if canvas is None:
+            return
+        local = canvas.mapFrom(self.view.viewport(), QPoint(int(pos.x()), int(pos.y())))
+        page_x, page_y = canvas.page_point(QPointF(local))
+        new = clamp_zoom(self.zoom * factor)
+        if abs(new - self.zoom) < 1e-4:
             if rerender:
                 self._rerender_current()
             return
         self.fit_mode = False
         self.zoom = new
         self.zoom_label.setText(f"{round(new * 100)}%")
-        self.canvas.set_zoom(new)
-        horizontal.setValue(int(round(scroll_x)))
-        vertical.setValue(int(round(scroll_y)))
+        self.view._lock = True
+        try:
+            for item in self.view.column.canvases:
+                item.set_zoom(new)
+        finally:
+            self.view._lock = False
+        frame_x = canvas.x() + canvas._origin.x()
+        frame_y = canvas.y() + canvas._origin.y()
+        scroll_x, scroll_y = scroll_to_keep_point(page_x, page_y, new, pos.x(), pos.y(), frame_x, frame_y)
+        self.view.horizontalScrollBar().setValue(int(round(scroll_x)))
+        self.view.verticalScrollBar().setValue(int(round(scroll_y)))
         if rerender:
             self._rerender_current()
 
@@ -1046,9 +1116,12 @@ class MainWindow(QMainWindow):
         if page.image_path and Path(page.image_path).exists():
             pixmap = QPixmap(page.image_path)
         else:
-            pixmap = _render_pdf(self.session.document.source_path, page.source_index, dpi)
-        self.canvas.pixmap = pixmap
-        self.canvas.update()
+            pixmap = _render_pdf(pdf_path(self.session.document), page.source_index, dpi)
+        canvas = self.canvas
+        if canvas is None:
+            return
+        canvas.pixmap = pixmap
+        canvas.update()
 
     def start_ocr(self) -> None:
         if not self.session or self.worker is not None:
@@ -1090,12 +1163,17 @@ class MainWindow(QMainWindow):
             self._pixmap_cache.clear()
             self.ocr_ran = True
         self._ocr_idle()
+        buttons = self.tab_group.buttons()
         if mask and self.session:
             self.session.rescan()
             self.preview = False
             self._show_tab(0)
-            if self.tab_group.buttons():
-                self.tab_group.buttons()[0].setChecked(True)
+            if buttons:
+                buttons[0].setChecked(True)
+        elif self.session:
+            self._show_tab(2)
+            if len(buttons) > 2:
+                buttons[2].setChecked(True)
         self.refresh()
 
     def _ocr_failed(self, message: str) -> None:
@@ -1152,9 +1230,15 @@ class MainWindow(QMainWindow):
         self._show_shade()
 
     def _confirm(self) -> None:
-        if self.session:
-            self.session.confirmed = True
-        self.preview = True
+        if not self.session:
+            return
+        try:
+            self.session.commit_redactions(self.work_dir, self.align_boxes)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "ekisui-pdf", f"確定できませんでした。\n{exc}")
+            return
+        self._pixmap_cache.clear()
+        self.preview = False
         self.shade.hide()
         self.refresh()
 
@@ -1170,7 +1254,8 @@ class MainWindow(QMainWindow):
         if self.session.groups and not self.session.confirmed:
             self._ask_unconfirmed_save()
             return
-        self._open_save_dialog("masked" if self.session.confirmed else "ocr")
+        masked = bool(self.session.confirmed or self.session.committed)
+        self._open_save_dialog("masked" if masked else "ocr")
 
     def _ask_unconfirmed_save(self) -> None:
         self._clear_dialog()
@@ -1301,7 +1386,14 @@ class MainWindow(QMainWindow):
             )
             groups = []
         try:
-            result = export_pdf(self.session.document, groups, dest, options, self.session.settings)
+            result = export_pdf(
+                self.session.document,
+                groups,
+                dest,
+                options,
+                self.session.settings,
+                archived=self.session.committed if masked else None,
+            )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "ekisui-pdf", f"保存できませんでした。\n{exc}")
             return
@@ -1311,7 +1403,7 @@ class MainWindow(QMainWindow):
         try:
             report = verify_pdf(
                 result.pdf_path,
-                self.session.groups,
+                [*self.session.committed, *self.session.groups],
                 self.session.settings,
                 self.session.table,
                 options.strip_metadata,
@@ -1325,7 +1417,11 @@ class MainWindow(QMainWindow):
         self._clear_dialog()
         title = QLabel("保存しました")
         title.setStyleSheet("font-size: 18px; font-weight: 600; color: #1e6b34;")
-        body = QLabel(f"読み取ったPDFを保存しました。マスキングはしていません。\n保存先 {Path(pdf_path).name}")
+        if self.session and self.session.committed:
+            note = "読み取ったPDFを保存しました。すでに確定したマスキングはそのままです。"
+        else:
+            note = "読み取ったPDFを保存しました。マスキングはしていません。"
+        body = QLabel(f"{note}\n保存先 {Path(pdf_path).name}")
         body.setWordWrap(True)
         close = QPushButton("閉じる")
         _mark(close, "primary")

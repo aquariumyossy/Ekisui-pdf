@@ -12,7 +12,7 @@ import html
 import re
 import zipfile
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 from ekisui.errors import WordConvertError
 
 _EXTERNAL = "この Word 文書は、外部の画像や文書、ひな形を参照しています。通信せずには開けないため、開くのをやめました。"
@@ -110,8 +110,9 @@ def neutralize_docx(source: Path, dest: Path) -> None:
             files = {info.filename: archive.read(info.filename) for info in archive.infolist() if not info.is_dir()}
     except zipfile.BadZipFile as exc:
         raise WordConvertError(_EXTERNAL) from exc
+    content_types = _content_types(files)
     for name, data in files.items():
-        if _foreign_part_fetches(name, data):
+        if _foreign_part_fetches(name, data, content_types.get(name, "")):
             raise WordConvertError(_EXTERNAL)
     if not any(_part_fetches(name, data) for name, data in files.items()):
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -188,14 +189,16 @@ def _text_has_remote_word_target(text: str) -> bool:
     return False
 
 
+_FOREIGN_TYPES = {"application/rtf", "text/rtf", "message/rfc822", "image/svg+xml", "text/css"}
+_SCHEMA_HOSTS = {"schemas.openxmlformats.org", "schemas.microsoft.com", "purl.org", "www.w3.org", "w3.org"}
+
+
 def _decode_part(data: bytes) -> str:
-    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
-        text = data.decode("utf-16")
-    elif b'encoding="UTF-16"' in data[:240] or b"encoding='UTF-16'" in data[:240]:
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")) or data.startswith((b"<\x00?\x00", b"\x00<\x00?")):
         text = data.decode("utf-16")
     else:
         text = data.decode("utf-8")
-    return text.replace('encoding="UTF-16"', 'encoding="UTF-8"').replace("encoding='UTF-16'", "encoding='UTF-8'")
+    return re.sub(r"(encoding\s*=\s*)([\"'])utf-16(?:le|be)?\2", r"\1\2UTF-8\2", text, count=1, flags=re.IGNORECASE)
 
 
 def _part_fetches(name: str, data: bytes) -> bool:
@@ -204,10 +207,29 @@ def _part_fetches(name: str, data: bytes) -> bool:
     return _markup_fetches(_decode_part(data), name.lower().endswith(".rels"))
 
 
-def _foreign_part_fetches(name: str, data: bytes) -> bool:
-    """RTF, MHT, and SVG are not markup parts, but Word imports them on open."""
+def _content_types(files: dict[str, bytes]) -> dict[str, str]:
+    raw = files.get("[Content_Types].xml")
+    if not raw:
+        return {}
+    try:
+        text = _decode_part(raw)
+    except UnicodeError:
+        return {}
+    found: dict[str, str] = {}
+    for match in re.finditer(r"<Override\b[^>]*>", text, re.IGNORECASE):
+        tag = match.group(0)
+        part = html.unescape(_attr_value(tag, "PartName") or "").lstrip("/")
+        kind = html.unescape(_attr_value(tag, "ContentType") or "").lower()
+        if part and kind:
+            found[part] = kind
+    return found
+
+
+def _foreign_part_fetches(name: str, data: bytes, content_type: str = "") -> bool:
+    """RTF, MHT, SVG, and CSS are imported by Word even when they are not OOXML."""
     lower = name.lower()
-    if not lower.endswith((".rtf", ".mht", ".mhtml", ".svg", ".css")):
+    foreign = lower.endswith((".rtf", ".mht", ".mhtml", ".svg", ".css")) or content_type.lower() in _FOREIGN_TYPES
+    if not foreign:
         return False
     for encoding in ("utf-8", "utf-16", "latin-1"):
         try:
@@ -220,14 +242,18 @@ def _foreign_part_fetches(name: str, data: bytes) -> bool:
 
 
 def _embedded_fetch_text(text: str) -> bool:
-    if re.search(r"\b(INCLUDEPICTURE|INCLUDETEXT|DDEAUTO)\b", text, re.IGNORECASE) and contains_remote(text):
-        return True
-    for match in re.finditer(r"https?://[^\s\"'<>]+", text, re.IGNORECASE):
-        url = match.group(0).lower()
-        if any(host in url for host in ("schemas.openxmlformats.org", "schemas.microsoft.com", "purl.org", "www.w3.org")):
-            continue
-        return True
-    return bool(re.search(r"(?<![A-Za-z0-9:])\\\\[^\s\"']+", text) or "file:////" in text.lower())
+    expanded = re.sub(r"\\'([0-9a-fA-F]{2})", lambda match: chr(int(match.group(1), 16)), text)
+    expanded = html.unescape(expanded)
+
+    def drop_schema(match: re.Match[str]) -> str:
+        url = match.group(0)
+        host = (urlparse(url).hostname or "").lower()
+        if host in _SCHEMA_HOSTS:
+            return ""
+        return url
+
+    stripped = re.sub(r"https?://[^\s\"'<>]+", drop_schema, expanded, flags=re.IGNORECASE)
+    return contains_remote(stripped)
 
 
 def _part_for_relationships(name: str) -> str | None:

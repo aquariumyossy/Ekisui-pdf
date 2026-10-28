@@ -60,17 +60,14 @@ def test_single_quoted_vml_and_explicit_relationship_are_removed(tmp_path) -> No
 def _package(directory: Path, parts: dict[str, bytes]) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     source = directory / "sample.docx"
+    payload = {
+        "[Content_Types].xml": b'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>',
+        "_rels/.rels": b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>',
+    }
+    payload.update(parts)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
-        archive.writestr(
-            "[Content_Types].xml",
-            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>',
-        )
-        archive.writestr(
-            "_rels/.rels",
-            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>',
-        )
-        for name, data in parts.items():
+        for name, data in payload.items():
             archive.writestr(name, data)
     source.write_bytes(buffer.getvalue())
     return source
@@ -111,6 +108,52 @@ def test_rtf_altchunk_utf16_rels_and_open_field_do_not_reach_word(tmp_path) -> N
     text = "\n".join(_parts(out.read_bytes()).values())
     assert "open.png" not in text
     assert "残す" in text
+
+
+def test_schema_lookalike_and_utf8_comment_do_not_slip_through(tmp_path) -> None:
+    svg = _package(tmp_path / "svg", {
+        "word/media/image1.svg": b'<svg xmlns="http://www.w3.org/2000/svg"><image href="http://www.w3.org.attacker.example/track.png"/></svg>',
+    })
+    with pytest.raises(WordConvertError) as caught:
+        neutralize_docx(svg, tmp_path / "svg-out.docx")
+    assert "外部" in str(caught.value)
+
+    mht = _package(tmp_path / "mht", {
+        "word/afchunk.mht": b'<img src="file://fileserver/share/secret.png">',
+    })
+    with pytest.raises(WordConvertError) as caught:
+        neutralize_docx(mht, tmp_path / "mht-out.docx")
+    assert "外部" in str(caught.value)
+
+    types = """<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Override PartName="/word/chunk.xml" ContentType="application/rtf"/>
+</Types>
+"""
+    rtf_named_xml = _package(tmp_path / "ctype", {
+        "[Content_Types].xml": types.encode(),
+        "word/chunk.xml": b'{\\rtf1 INCLUDEPICTURE "http://example.invalid/a.png"}',
+    })
+    with pytest.raises(WordConvertError) as caught:
+        neutralize_docx(rtf_named_xml, tmp_path / "ctype-out.docx")
+    assert "外部" in str(caught.value)
+
+    document = """<?xml version="1.0" encoding="UTF-8"?>
+<!-- encoding="UTF-16" -->
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body><w:p><w:r>
+    <w:fldChar w:fldCharType="begin"/>
+    <w:instrText> INCLUDEPICTURE "http://example.invalid/open.png" </w:instrText>
+    <w:t>KEEP</w:t>
+  </w:r></w:p></w:body>
+</w:document>
+""".encode()
+    commented = _package(tmp_path / "comment", {"word/document.xml": document})
+    dest = tmp_path / "comment-clean.docx"
+    neutralize_docx(commented, dest)
+    text = "\n".join(_parts(dest.read_bytes()).values())
+    assert "open.png" not in text
+    assert "KEEP" in text
 
 
 def test_remote_forms() -> None:

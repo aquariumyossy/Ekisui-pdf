@@ -109,10 +109,12 @@ def _queries_for(group: TermGroup) -> list[str]:
         queries.append(group.canonical)
     for tracked in included:
         surface = tracked.hit.surface
-        if not tracked.adjusted and strict_text(surface) == strict_text(group.canonical):
-            continue
-        if all(strict_text(surface) != strict_text(query) for query in queries):
-            queries.append(surface)
+        if tracked.adjusted or strict_text(surface) != strict_text(group.canonical):
+            if all(strict_text(surface) != strict_text(query) for query in queries):
+                queries.append(surface)
+        for extra in (tracked.prior_surface, tracked.corrected_surface):
+            if extra and all(strict_text(extra) != strict_text(query) for query in queries):
+                queries.append(extra)
     if not queries and included:
         queries.append(included[0].hit.surface)
     return queries

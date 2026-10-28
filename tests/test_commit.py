@@ -2,6 +2,8 @@
 
 import os
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from pathlib import Path
@@ -147,7 +149,10 @@ def test_confirm_then_new_range_keeps_the_first_redaction(tmp_path):
     window._goto(0)
     window._show_tab(0)
     window._show_tab(2)
-    window.session.correct_line(keep.id, "控える文章")
+    from ekisui.errors import EkisuiError
+
+    with pytest.raises(EkisuiError):
+        window.session.correct_line(keep.id, "控える文章です")
     window._rescan()
     assert "山田太郎" not in _text(Path(window.session.document.working_path))
     assert _dark_qpix(

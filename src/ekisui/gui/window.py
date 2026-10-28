@@ -402,6 +402,7 @@ class MainWindow(QMainWindow):
         self.candidates.actionChanged.connect(self._set_action)
         self.candidates.pseudonymEdited.connect(self._set_name)
         self.candidates.activated.connect(self._activate_hit)
+        self.candidates.reviewed.connect(self._acknowledge_review)
         self.candidates.excludeRequested.connect(self._exclude)
         self.candidates.selectAll.connect(lambda _v: self._fill_candidates())
         self.table.includeVariant.connect(lambda hit_id: self._toggle_hit(hit_id, True))
@@ -484,7 +485,8 @@ class MainWindow(QMainWindow):
             button.setEnabled(ready)
         self.btn_save.setEnabled(ready and self._can_save())
         self.btn_save.setToolTip(self._save_tip())
-        self.btn_confirm.setEnabled(ready)
+        self.btn_confirm.setEnabled(ready and not self._ocr_review_pending())
+        self._refresh_confirm_tip()
         self.btn_open.setEnabled(not self.ocr_running)
         self.side.setVisible(self.session is not None and not self.ocr_running)
         self._fill_recent()
@@ -742,6 +744,8 @@ class MainWindow(QMainWindow):
                         "surface": tracked.hit.surface,
                         "included": tracked.included,
                         "adjusted": tracked.adjusted,
+                        "needs_review": tracked.needs_review,
+                        "ocr_changed": tracked.ocr_changed,
                         "kind": kind,
                         "label": label,
                         "tip": tip,
@@ -769,6 +773,8 @@ class MainWindow(QMainWindow):
                 )
                 slot["ids"].append(tracked.id)
                 slot["included"] = slot["included"] or tracked.included
+                if tracked.ocr_changed:
+                    slot["note"] = "OCR修正で変更"
             if group.category == Category.COMPANY:
                 section = "会社"
             elif group.category == Category.PERSON:
@@ -1037,17 +1043,42 @@ class MainWindow(QMainWindow):
         for page in self.session.document.pages:
             for line in page.lines:
                 if line.id == line_id:
+                    if self.session.page_is_confirmed(page.index):
+                        QMessageBox.warning(self, "ekisui-pdf", "このページは確定済みです。画像と文字を消したので、OCR修正はできません。")
+                        return
                     self.show_lines = True
                     self.line_toggle.setChecked(True)
                     self._goto(page.index, scroll=page.index != self.page_index)
                     self.canvas.begin_edit(line)
                     return
 
+    def _ocr_review_pending(self) -> bool:
+        return self.session is not None and self.session.unreviewed_ocr()
+
+    def _refresh_confirm_tip(self) -> None:
+        if self._ocr_review_pending():
+            self.btn_confirm.setToolTip("OCR修正で変わった候補が未確認です。一覧の「要確認」を確認してから確定できます。")
+        else:
+            self.btn_confirm.setToolTip("選んだ箇所のマスキングを、開いているPDFに確定します。画像と文字を消す処理です。元のファイルは変更しません。")
+
+    def _acknowledge_review(self, hit_id: str) -> None:
+        if not self.session:
+            return
+        self.session.acknowledge_review(hit_id)
+        self.refresh()
+
     def _commit_line(self, line_id: str, text: str) -> None:
         if not self.session:
             return
-        self.session.correct_line(line_id, text)
+        try:
+            self.session.correct_line(line_id, text)
+        except EkisuiError as exc:
+            QMessageBox.warning(self, "ekisui-pdf", str(exc))
+            return
         self.preview = False
+        self._show_tab(0)
+        if self.tab_group.buttons():
+            self.tab_group.buttons()[0].setChecked(True)
         self.refresh()
 
     def _rescan(self) -> None:
@@ -1241,6 +1272,9 @@ class MainWindow(QMainWindow):
     def _open_confirm(self) -> None:
         if not self.session:
             return
+        if self.session.unreviewed_ocr():
+            QMessageBox.warning(self, "ekisui-pdf", "OCR修正で変わった候補が未確認です。一覧の「要確認」を確認してから確定してください。")
+            return
         black = replace_n = 0
         names = set()
         pages = set()
@@ -1282,6 +1316,9 @@ class MainWindow(QMainWindow):
 
     def _confirm(self) -> None:
         if not self.session:
+            return
+        if self.session.unreviewed_ocr():
+            QMessageBox.warning(self, "ekisui-pdf", "OCR修正で変わった候補が未確認です。一覧の「要確認」を確認してから確定してください。")
             return
         try:
             self.session.commit_redactions(self.work_dir, self.align_boxes)

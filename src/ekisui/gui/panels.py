@@ -85,6 +85,7 @@ class CandidatePanel(QWidget):
     actionChanged = Signal(str, object)
     pseudonymEdited = Signal(str, str)
     activated = Signal(str)
+    reviewed = Signal(str)
     excludeRequested = Signal()
     confirmRequested = Signal()
     selectAll = Signal(bool)
@@ -218,6 +219,17 @@ class CandidatePanel(QWidget):
             mark.setProperty("class", "sub")
             mark.setToolTip("手動で範囲を調整しました。")
             top.addWidget(mark)
+        if row.get("needs_review"):
+            review = QPushButton("要確認")
+            review.setProperty("class", "ib")
+            review.setToolTip("OCR修正で変わった候補です。確認するまで、確定できません。")
+            review.clicked.connect(lambda _c=False, hit_id=row["hit_id"]: self.reviewed.emit(hit_id))
+            top.addWidget(review)
+        elif row.get("ocr_changed"):
+            note = QLabel("OCR修正で変更")
+            note.setProperty("class", "sub")
+            note.setToolTip("OCR修正で変わった候補です。確認済みです。")
+            top.addWidget(note)
         top.addWidget(page)
         bottom.addWidget(kind)
         bottom.addWidget(black)
@@ -345,6 +357,11 @@ class TablePanel(QWidget):
             inner = QHBoxLayout(chip)
             inner.setContentsMargins(6, 2, 4, 2)
             inner.addWidget(QLabel(variant["text"]))
+            if variant.get("note"):
+                note = QLabel(variant["note"])
+                note.setProperty("class", "sub")
+                note.setToolTip("OCR修正で変わった表記です。候補一覧の「要確認」を確認してから確定します。")
+                inner.addWidget(note)
             if variant["included"]:
                 button = QPushButton("×")
                 button.setFixedSize(22, 22)

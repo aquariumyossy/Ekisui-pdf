@@ -8,8 +8,9 @@ from ekisui.domain.adjust import bbox_of_range, bind_span, move_edge, snap_bound
 from ekisui.domain.candidates import AutoGroup, suggest
 from ekisui.domain.index import _cells, build_document_index
 from ekisui.domain.match import search_pages, text_in_rect
-from ekisui.domain.normalize import ConfusableTable, load_confusables, strict_text
+from ekisui.domain.normalize import ConfusableTable, load_confusables, loose_text, strict_text
 from ekisui.domain.pseudonym import address_name, company_name, person_name, phrase_name
+from ekisui.errors import EkisuiError
 from ekisui.domain.types import (
     Action,
     Category,
@@ -38,6 +39,11 @@ class TrackedHit:
     end: int = -1
     original_start: int = -1
     original_end: int = -1
+    needs_review: bool = False
+    ocr_changed: bool = False
+    # Pre-correction OCR text and the corrected reading. Leftover check searches both.
+    prior_surface: str = ""
+    corrected_surface: str = ""
 
 
 @dataclass
@@ -147,30 +153,115 @@ class Session:
         self.confirmed = False
         return group
 
+    def page_is_confirmed(self, page_index: int) -> bool:
+        """A page whose pixels were burned can no longer be corrected."""
+        for group in self.committed:
+            for tracked in group.hits:
+                if tracked.hit.page_index == page_index:
+                    return True
+        return False
+
+    def unreviewed_ocr(self) -> bool:
+        return any(tracked.needs_review for group in self.groups for tracked in group.hits)
+
+    def acknowledge_review(self, hit_id: str) -> None:
+        self._hit(hit_id).needs_review = False
+
     def correct_line(self, line_id: str, new_text: str) -> None:
+        line = self._line(line_id)
+        if self.page_is_confirmed(line.page_index):
+            raise EkisuiError("このページは確定済みです。画像と文字を消したので、OCR修正はできません。")
+        old_text = line.text
         pages: list[Page] = []
-        found = False
         for page in self.document.pages:
             lines: list[TextLine] = []
-            for line in page.lines:
-                if line.id == line_id:
-                    found = True
-                    lines.append(
-                        replace(
-                            line,
-                            text=new_text,
-                            confidence=1.0,
-                            source=TextSource.CORRECTED,
-                        )
-                    )
+            for item in page.lines:
+                if item.id == line_id:
+                    lines.append(replace(item, text=new_text, confidence=1.0, source=TextSource.CORRECTED))
                 else:
-                    lines.append(line)
+                    lines.append(item)
             pages.append(replace(page, lines=tuple(lines)))
-        if not found:
-            raise KeyError(line_id)
         self.document = replace(self.document, pages=tuple(pages))
         self._index = None
+        if strict_text(old_text) != strict_text(new_text):
+            self._relink_ocr_line(line_id, old_text)
         self.confirmed = False
+
+    def _relink_ocr_line(self, line_id: str, old_text: str) -> None:
+        """Keep the pre-correction box, and add unchecked hits for the new reading."""
+        line = self._line(line_id)
+        kept = self._hits_touching(line_id, line.bbox)
+        for tracked in kept:
+            tracked.needs_review = True
+            tracked.ocr_changed = True
+            if not tracked.prior_surface:
+                tracked.prior_surface = tracked.hit.surface or old_text
+        known = {tracked.id for group in self.groups for tracked in group.hits}
+        for auto in self._suggest_line(line):
+            fresh = [hit for hit in auto.hits if line_id in hit.line_ids]
+            if not fresh:
+                continue
+            group = self._group_for_normalized(auto.canonical, auto.category)
+            flagged = tuple(replace(hit, checked=False) for hit in fresh)
+            if group is None:
+                self._add_group(
+                    auto.category,
+                    auto.canonical,
+                    flagged,
+                    origin="auto",
+                    include_fuzzy=False,
+                    action=auto.action,
+                )
+            else:
+                self._append_hits(group, flagged, include_fuzzy=False, included=False, overlap="surface")
+        new_surfaces = []
+        for group in self.groups:
+            for tracked in group.hits:
+                if tracked.id in known or line_id not in tracked.hit.line_ids:
+                    continue
+                tracked.included = False
+                tracked.needs_review = True
+                tracked.ocr_changed = True
+                tracked.prior_surface = tracked.prior_surface or old_text
+                tracked.corrected_surface = tracked.hit.surface
+                new_surfaces.append(tracked.hit.surface)
+        corrected = new_surfaces[0] if new_surfaces else line.text
+        for tracked in kept:
+            if not tracked.corrected_surface:
+                tracked.corrected_surface = corrected
+
+    def _suggest_line(self, line: TextLine):
+        from ekisui.domain.candidates import suggest
+        from ekisui.domain.index import build_page_index
+
+        page = self.document.pages[line.page_index]
+        solo = replace(page, lines=(line,))
+        return suggest((build_page_index(solo, self.table),), self.settings, self.table)
+
+    def _hits_touching(self, line_id: str, bbox: Rect) -> list[TrackedHit]:
+        page_index = self._line(line_id).page_index
+        found: list[TrackedHit] = []
+        for group in self.groups:
+            for tracked in group.hits:
+                if line_id in tracked.hit.line_ids or tracked.line_id == line_id:
+                    found.append(tracked)
+                    continue
+                center = tracked.hit.bbox.center()
+                if tracked.hit.page_index == page_index and bbox.contains(*center):
+                    found.append(tracked)
+        return found
+
+    def _group_for_normalized(self, text: str, category: Category) -> TermGroup | None:
+        group = self._group_for_canonical(text, category)
+        if group is not None:
+            return group
+        folded = loose_text(text, self.table)
+        if category == Category.ADDRESS:
+            return None
+        for item in self.groups:
+            if item.category == category and loose_text(item.canonical, self.table) == folded and folded:
+                return item
+        return None
 
     def rescan(self) -> None:
         manual = [group for group in self.groups if group.origin in {"search", "region", "table"}]
@@ -345,6 +436,7 @@ class Session:
     def set_included(self, hit_id: str, included: bool) -> None:
         hit = self._hit(hit_id)
         hit.included = included
+        hit.needs_review = False
         self.confirmed = False
 
     def set_included_many(self, hit_ids: list[str], included: bool) -> None:
@@ -502,16 +594,10 @@ class Session:
         hits: list[Hit] | tuple[Hit, ...],
         include_fuzzy: bool,
         included: bool | None = None,
+        overlap: str = "place",
     ) -> None:
         for hit in hits:
-            if any(_same_place(existing.hit, hit) for existing in group.hits):
-                continue
-            if any(
-                _same_place(existing.hit, hit)
-                for other in self.groups
-                if other is not group
-                for existing in other.hits
-            ):
+            if _occupied(self.groups, group, hit, overlap):
                 continue
             flag = included
             if flag is None:
@@ -593,6 +679,18 @@ def _default_included(category: Category, hit: Hit, include_fuzzy: bool) -> bool
     if hit.kind.name == "EXACT" or hit.ocr_like:
         return True
     return include_fuzzy
+
+
+def _occupied(groups: list[TermGroup], group: TermGroup, hit: Hit, overlap: str) -> bool:
+    pool = [existing for existing in group.hits]
+    pool.extend(existing for other in groups if other is not group for existing in other.hits)
+    for existing in pool:
+        if not _same_place(existing.hit, hit):
+            continue
+        if overlap == "surface" and strict_text(existing.hit.surface) != strict_text(hit.surface):
+            continue
+        return True
+    return False
 
 
 def _same_place(left: Hit, right: Hit) -> bool:

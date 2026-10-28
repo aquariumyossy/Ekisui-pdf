@@ -24,6 +24,7 @@ class RedactionBox:
     pseudonym: str | None
     original: str | None
     adjusted: bool = False
+    ocr_changed: bool = False
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,7 @@ def redaction_boxes(
                     pseudonym=pseudonym,
                     original=tracked.hit.surface,
                     adjusted=tracked.adjusted,
+                    ocr_changed=tracked.ocr_changed,
                 )
             )
     return boxes
@@ -222,7 +224,11 @@ def write_log(path: Path, boxes: list[RedactionBox], include_original: bool) -> 
                 round(box.rect.y1, 2),
                 "黒塗り" if box.action == Action.BLACKOUT else "置換",
                 box.pseudonym or "",
-                "手動" if box.adjusted else "",
+                " ".join(
+                    part
+                    for part, flag in (("手動", box.adjusted), ("OCR修正で変更", box.ocr_changed))
+                    if flag
+                ),
             ]
             if include_original:
                 row.append(box.original or "")

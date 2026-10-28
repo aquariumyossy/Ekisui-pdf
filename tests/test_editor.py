@@ -55,7 +55,7 @@ def test_editor_widget_stays_inside_a_narrow_viewport():
     app.processEvents()
     viewport = view.viewport()
     assert canvas.ok_button.text() == "確定"
-    assert canvas.ok_button.toolTip() == "この行の文字を確定します。（Enterで確定、Escで取消）"
+    assert canvas.ok_button.toolTip() == "この行の文字を確定します。直した文字で、この行の候補と置換表を更新します。（Enterで確定、Escで取消）"
     visible = canvas._visible_rect()
     for widget in (canvas.editor, canvas.ok_button):
         assert widget.isVisible()

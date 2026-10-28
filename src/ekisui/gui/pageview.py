@@ -143,7 +143,7 @@ class PageCanvas(QWidget):
         self.editor.installEventFilter(self)
         self.ok_button = QPushButton("確定", self)
         self.ok_button.setProperty("class", "ib")
-        self.ok_button.setToolTip("この行の文字を確定します。（Enterで確定、Escで取消）")
+        self.ok_button.setToolTip("この行の文字を確定します。直した文字で、この行の候補と置換表を更新します。（Enterで確定、Escで取消）")
         self.ok_button.hide()
         self.ok_button.clicked.connect(self._confirm_edit)
         self._edit_line = ""

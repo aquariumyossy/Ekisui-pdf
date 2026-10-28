@@ -1,0 +1,111 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Qt libraries and a Japanese font
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libglib2.0-0 libdbus-1-3 libxkbcommon0 libfontconfig1 fonts-wqy-microhei
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Model hashes
+        run: python tools/verify_models.py
+      - name: Tests
+        run: python -m pytest -q
+
+  installer:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e . pyinstaller
+      - name: Model hashes
+        run: python tools/verify_models.py
+      - name: Bundle
+        run: pyinstaller ekisui.spec
+      - name: Frozen smoke
+        timeout-minutes: 25
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          New-Item -ItemType Directory -Force -Path dist\smoke-out | Out-Null
+          $proc = Start-Process -FilePath "dist\ekisui-pdf\ekisui-pdf.exe" -ArgumentList "--smoke","dist\smoke-out" -Wait -PassThru
+          $log = "dist\smoke-out\smoke.log"
+          if (Test-Path $log) { Get-Content $log }
+          $smoke = 0
+          if ($null -eq $proc.ExitCode -or $proc.ExitCode -ne 0) {
+            Write-Host "SMOKE_EXIT $($proc.ExitCode)"
+            $smoke = 1
+          } elseif (-not (Select-String -Path $log -Pattern "^SMOKE_OK$" -Quiet)) {
+            Write-Host "SMOKE_LOG_MISSING"
+            $smoke = 1
+          }
+          python tools/check_bundle.py dist\ekisui-pdf
+          if ($smoke -ne 0 -or $LASTEXITCODE -ne 0) { exit 1 }
+      - name: Inno Setup
+        run: choco install innosetup -y
+      - name: Installer
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\ekisui-pdf.iss
+      - name: Icon resources
+        run: |
+          python tools/check_exe_icon.py dist\ekisui-pdf\ekisui-pdf.exe assets\icon\ekisui.ico
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/check_exe_icon.py dist\ekisui-pdf-1.0.0-win64-setup.exe assets\icon\ekisui.ico
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: File version
+        run: |
+          $exe = (Get-Item dist\ekisui-pdf\ekisui-pdf.exe).VersionInfo.FileVersion
+          $setup = (Get-Item dist\ekisui-pdf-1.0.0-win64-setup.exe).VersionInfo.FileVersion
+          Write-Host "FILE_VERSION $exe"
+          Write-Host "SETUP_VERSION $setup"
+          if ($exe -notlike "1.0.0*") { exit 1 }
+          if ($setup -notlike "1.0.0*") { exit 1 }
+      - name: SHA-256
+        run: |
+          Get-FileHash dist\ekisui-pdf-1.0.0-win64-setup.exe -Algorithm SHA256 | Format-List
+          $setup = (Get-Item dist\ekisui-pdf-1.0.0-win64-setup.exe).Length
+          Write-Host "SETUP_BYTES $setup"
+      - name: Installed samples
+        run: |
+          $dest = Join-Path $env:TEMP "ekisui-install-samples"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          $setup = (Resolve-Path "dist\ekisui-pdf-1.0.0-win64-setup.exe").Path
+          $proc = Start-Process -FilePath $setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=$dest" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { Write-Host "INSTALL_EXIT $($proc.ExitCode)"; exit 1 }
+          $samples = Join-Path $dest "samples"
+          $pdfs = @(Get-ChildItem -LiteralPath $samples -Filter *.pdf)
+          if ($pdfs.Count -lt 2) { Write-Host "SAMPLE_MISSING"; exit 1 }
+          $scan = $pdfs | Sort-Object Length -Descending | Select-Object -First 1
+          $env:SAMPLE_SCAN = $scan.FullName
+          python -c "import os, pymupdf; doc = pymupdf.open(os.environ['SAMPLE_SCAN']); assert doc.page_count == 2; assert all(not page.get_text().strip() for page in doc); print('SAMPLE_INSTALLED', doc.page_count)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $masked = Join-Path $samples ($scan.BaseName + "_Masked.pdf")
+          Set-Content -LiteralPath $masked -Value "user saved" -Encoding ascii
+          $unins = Join-Path $dest "unins000.exe"
+          $removed = Start-Process -FilePath $unins -ArgumentList "/VERYSILENT","/NORESTART" -Wait -PassThru
+          if ($removed.ExitCode -ne 0) { Write-Host "UNINSTALL_EXIT $($removed.ExitCode)"; exit 1 }
+          if (Test-Path -LiteralPath $scan.FullName) { Write-Host "SAMPLE_STILL_THERE"; exit 1 }
+          if (-not (Test-Path -LiteralPath $masked)) { Write-Host "USER_FILE_REMOVED"; exit 1 }
+          Write-Host "SAMPLE_UNINSTALL_OK"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ekisui-pdf-1.0.0-win64-setup
+          path: dist/ekisui-pdf-1.0.0-win64-setup.exe
+          if-no-files-found: error

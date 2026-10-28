@@ -1,0 +1,7 @@
+# Windows runners set core.autocrlf=true. The dict is hashed byte for byte,
+# so a CRLF checkout fails CI and would ship different bytes in the installer.
+models/ppocrv5/*.onnx binary
+models/ppocrv5/ppocrv5_dict.txt text eol=lf
+models/SHA256SUMS text eol=lf
+*.png binary
+*.pdf binary

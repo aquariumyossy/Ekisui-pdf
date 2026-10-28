@@ -31,6 +31,8 @@ PIXEL_H = round(PAGE_H * DPI / 72)
 # Fixed clock so a second run writes the same PDF bytes.
 _PDF_DATE = "D:20261028000000Z"
 
+# 00 and 000 are not subscriber prefixes. The numbers do not contain
+# 000-0000, so they are not the sample postal code, and neither contains the other.
 # Vertical gaps stay wider than a line wrap, so each fact is its own line.
 PAGES: tuple[tuple[tuple[str, int, int], ...], ...] = (
     (
@@ -39,7 +41,7 @@ PAGES: tuple[tuple[tuple[str, int, int], ...], ...] = (
         ("甲　株式会社架空商事", 360, 46),
         ("代表者は山田太郎", 510, 46),
         ("住所は東京都千代田区架空町1丁目2番3号", 660, 46),
-        ("電話03-5555-0000", 810, 46),
+        ("電話00-1111-2222", 810, 46),
         ("メール taro.yamada@example.jp", 960, 46),
         ("乙　株式会社架空工業", 1140, 46),
         ("担当は佐藤花子", 1290, 46),
@@ -50,7 +52,7 @@ PAGES: tuple[tuple[tuple[str, int, int], ...], ...] = (
         ("株式会社架空銀行", 180, 64),
         ("口座番号5555555", 360, 48),
         ("hanako.kaku@example.com", 540, 46),
-        ("電話090-5555-0001", 720, 48),
+        ("電話000-2222-1111", 720, 48),
         ("大阪府架空市架空町1丁目4番5号", 900, 60),
         ("大阪府架空市架空町1-4-5", 1080, 56),
     ),

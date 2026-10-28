@@ -88,6 +88,60 @@ def test_phrase_search_raises_fuzzy_candidates():
     assert group.pseudonym == "会社A"
 
 
+def test_unassigned_zero_numbers_are_phones():
+    doc = document_from_lines([["電話00-1111-2222"], ["携帯000-2222-1111"], ["郵便番号〒000-0000"]])
+    session = Session(doc, Settings())
+    session.suggest()
+    phones = {group.canonical for group in session.groups if group.category == Category.PHONE}
+    assert phones == {"00-1111-2222", "000-2222-1111"}
+    postals = [group for group in session.groups if group.category == Category.POSTAL]
+    assert len(postals) == 1
+    assert postals[0].canonical == "〒000-0000"
+    assert len(postals[0].hits) == 1
+
+
+def _companies(lines: list[str]) -> list[str]:
+    doc = document_from_lines([lines], gap=29.0)
+    session = Session(doc, Settings())
+    session.suggest()
+    return [group.canonical for group in session.groups if group.category == Category.COMPANY]
+
+
+def test_a_finished_company_does_not_take_the_next_line():
+    doc = document_from_lines(
+        [["前文が続いて株式会社サンフル商事", "山田太朗", "前文が続いて株式会社サンプル商事"]],
+        gap=29.0,
+    )
+    session = Session(doc, Settings())
+    session.suggest()
+    companies = [group.canonical for group in session.groups if group.category == Category.COMPANY]
+    assert companies
+    assert all("山田" not in name and "代表" not in name for name in companies), companies
+    people = [group.canonical for group in session.groups if group.category == Category.PERSON]
+    assert any("山田太朗" in name for name in people), people
+    kept = _companies(["前文が続いて株式会社エクイスイ", "代表者は山田太郎であるとする。"])
+    assert kept == ["株式会社エクイスイ"], kept
+    kept = _companies(["前文が続いて株式会社エクイスイ", "担当は佐藤花子であるとする。"])
+    assert kept == ["株式会社エクイスイ"], kept
+
+
+def test_a_company_split_before_its_suffix_still_joins():
+    assert "株式会社サンプル商事" in _companies(["甲は株式会社サンプル", "商事と契約した。"])
+    assert "株式会社サンプル商事" in _companies(["前文が長く続いて行末の株式会社", "サンプル商事と契約した。"])
+    assert "架空商事株式会社" in _companies(["甲は相当に長い商号である架空商事", "株式会社と本契約を締結する。"])
+    assert "株式会社山田工業所" in _companies(["前文が長く続いて株式会社山田工業", "所と契約した。"])
+
+
+def test_a_second_title_is_not_part_of_the_name():
+    for line in ("原告訴訟代理人弁護士　架空花子", "原告訴訟代理人　弁護士　架空花子"):
+        doc = document_from_lines([[line]])
+        session = Session(doc, Settings())
+        session.suggest()
+        people = [group.canonical for group in session.groups if group.category == Category.PERSON]
+        assert any("架空花子" in name for name in people), (line, people)
+        assert all("弁護士" not in name and "訴訟" not in name for name in people), (line, people)
+
+
 def test_suggest_does_not_merge_different_people():
     doc = document_from_lines([["佐藤一郎と佐藤二郎"]])
     table = load_confusables()

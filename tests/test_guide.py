@@ -73,6 +73,10 @@ def test_guide_keeps_cautions_and_matches_html() -> None:
     guide = (ROOT / "docs" / "使い方.md").read_text(encoding="utf-8")
     html = (ROOT / "docs" / "使い方.html").read_text(encoding="utf-8")
     assert html == render_guide(guide)
+    assert "<code>samples</code>" in html
+    assert "<code>架空契約_スキャン.pdf</code>" in html
+    assert "<code>名前_Masked.pdf</code>" in html
+    assert "`" not in html
     for phrase in CAUTIONS:
         assert phrase in guide
         assert phrase in html

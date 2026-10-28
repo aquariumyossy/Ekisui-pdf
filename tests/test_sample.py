@@ -25,8 +25,8 @@ EXPECTED = (
     "株式会社架空商事",
     "株式会社架空工業",
     "株式会社架空銀行",
-    "03-5555-0000",
-    "090-5555-0001",
+    "00-1111-2222",
+    "000-2222-1111",
     "taro.yamada@example.jp",
     "hanako.kaku@example.com",
     "5555555",
@@ -75,6 +75,14 @@ def test_scan_pipeline_redacts_the_fake_entities(tmp_path: Path) -> None:
     found = {group.canonical for group in session.groups}
     missing = [item for item in EXPECTED if item not in found]
     assert not missing, missing
+    phones = [group for group in session.groups if group.category == Category.PHONE]
+    postals = [group for group in session.groups if group.category == Category.POSTAL]
+    assert len(postals) == 1
+    for postal in postals:
+        for phone in phones:
+            for hit in postal.hits:
+                postal_lines = set(hit.hit.line_ids)
+                assert all(postal_lines.isdisjoint(other.hit.line_ids) for other in phone.hits)
     tokyo = next(group for group in session.groups if "千代田区架空町" in group.canonical)
     osaka = next(group for group in session.groups if "架空市架空町" in group.canonical)
     assert {hit.hit.surface for hit in tokyo.hits} == {
@@ -104,7 +112,7 @@ def test_scan_pipeline_redacts_the_fake_entities(tmp_path: Path) -> None:
         flat = "".join(page.get_text() for page in saved)
     finally:
         saved.close()
-    for secret in ("山田太郎", "佐藤花子", "03-5555-0000", "5555555", "example.jp"):
+    for secret in ("山田太郎", "佐藤花子", "00-1111-2222", "000-2222-1111", "5555555", "example.jp"):
         assert secret not in flat
     assert "サンプル・架空のデータです" in flat.replace(" ", "")
 

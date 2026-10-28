@@ -274,7 +274,8 @@ def _column_wraps(page: PageIndex) -> list[tuple[tuple[int, int], tuple[int, int
             further = next_below(nxt)
             if further is None:
                 continue
-            if infos[nxt][3] <= 12 and is_line_wrap(infos[nxt][2], infos[further][2]):
+            # イザ, ドバイザ, or ー. A label such as 代表者は山田太郎 is not a fragment.
+            if infos[nxt][3] <= 6 and is_line_wrap(infos[nxt][2], infos[further][2]):
                 successors[nxt] = further
                 growing = True
     return [((infos[index][0], infos[index][1]), (infos[nxt][0], infos[nxt][1])) for index, nxt in successors.items()]

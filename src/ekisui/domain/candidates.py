@@ -272,8 +272,16 @@ def _title_person_spans(page: PageIndex) -> list[Span]:
             if title is None:
                 cursor += 1
                 continue
-            name = _scan_name(line.text, cursor + len(title))
-            cursor += len(title)
+            title_end = cursor + len(title)
+            while True:
+                while title_end < len(line.text) and line.text[title_end].isspace():
+                    title_end += 1
+                nxt = next((name for name in titles if line.text.startswith(name, title_end)), None)
+                if nxt is None:
+                    break
+                title_end += len(nxt)
+            name = _scan_name(line.text, title_end)
+            cursor = title_end
             if name is None:
                 continue
             name_start, name_end = name
@@ -508,6 +516,11 @@ def _spans_across_wrap(
         done = pattern.match(left)
         if done is not None and done.end() == len(left) and not _wrap_continues(right):
             return
+        # A complete company stays on its line. 株式会社 / サンプル商事 and
+        # 架空商事 / 株式会社 still cross, because the left slice is not complete.
+        # 株式会社サンプル / 商事 crosses. 株式会社エクイスイ / 代表者 does not.
+        if category == Category.COMPANY and _finished_company(left) and _new_phrase(right):
+            return
         surface = text[local_start:local_end]
         if left_page.page_index == right_page.page_index and left_stop == right_start:
             pieces = ((left_page, cut + local_start, right_start + (local_end - join)),)
@@ -549,6 +562,32 @@ def _spans_across_wrap(
             continue
         add(match.start(), match.end(), Category.PERSON, person_re, text)
     return found
+
+
+# The next line may finish the trade name. A following word (代表者, 山田太朗) may not.
+_NAME_TAIL = ("商事", "工業", "銀行", "事務所", "商", "事", "所")
+
+
+def _finished_company(text: str) -> bool:
+    """True when ``text`` is already a whole company, not a bare 株式会社 or 架空商事."""
+    return any(pattern.fullmatch(text) for pattern in _COMPANY_RES)
+
+
+def _name_tail(text: str) -> bool:
+    for tail in _NAME_TAIL:
+        if not text.startswith(tail):
+            continue
+        rest = text[len(tail):]
+        if not rest or not _is_name_char(rest[0]):
+            return True
+    return False
+
+
+def _new_phrase(text: str) -> bool:
+    """True when the next line is not the rest of this company."""
+    if not text or not _wrap_continues(text):
+        return True
+    return not _name_tail(text)
 
 
 def _wrap_continues(text: str) -> bool:

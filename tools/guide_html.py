@@ -11,8 +11,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def inline(text: str) -> str:
-    escaped = html.escape(text.strip())
-    return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    """Bold and `code`. Backticks are tags, not characters on the page."""
+    stripped = text.strip()
+    parts: list[str] = []
+    cursor = 0
+    for match in re.finditer(r"`([^`]+)`", stripped):
+        parts.append(_emphasis(stripped[cursor:match.start()]))
+        parts.append(f"<code>{html.escape(match.group(1))}</code>")
+        cursor = match.end()
+    parts.append(_emphasis(stripped[cursor:]))
+    return "".join(parts)
+
+
+def _emphasis(text: str) -> str:
+    return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", html.escape(text))
 
 
 def render_guide(markdown: str) -> str:
@@ -70,6 +82,11 @@ body {{
   background: #fff;
 }}
 img {{ max-width: 100%; height: auto; border: 1px solid #d0d0d0; }}
+code {{
+  font-family: Consolas, "Cascadia Mono", "Yu Gothic UI", monospace;
+  background: #f3f3f3;
+  padding: 0 0.25em;
+}}
 h1 {{ font-size: 28px; }}
 h2 {{ font-size: 22px; margin-top: 2.2em; padding-bottom: 4px; border-bottom: 1px solid #e6e6e6; }}
 h3 {{ font-size: 18px; margin-top: 1.6em; }}

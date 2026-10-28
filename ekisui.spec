@@ -14,7 +14,54 @@ sys.path.insert(0, str(Path(SPECPATH) / "src"))
 
 from PyInstaller.utils.hooks import collect_all
 
+from ekisui import __version__
 from ekisui.bundle_filter import analysis_excludes, excluded_module, keep_toc_entry, shipped_name
+
+def _file_version(text: str) -> tuple[int, int, int, int]:
+    parts = [int(piece) for piece in text.split(".")]
+    return tuple((parts + [0, 0, 0, 0])[:4])
+
+
+_version_file = Path(SPECPATH) / "build" / "file_version.txt"
+_version_file.parent.mkdir(exist_ok=True)
+_numbers = _file_version(__version__)
+_version_file.write_text(
+    "\n".join(
+        [
+            "VSVersionInfo(",
+            "  ffi=FixedFileInfo(",
+            f"    filevers={_numbers},",
+            f"    prodvers={_numbers},",
+            "    mask=0x3f,",
+            "    flags=0x0,",
+            "    OS=0x40004,",
+            "    fileType=0x1,",
+            "    subtype=0x0,",
+            "    date=(0, 0)",
+            "  ),",
+            "  kids=[",
+            "    StringFileInfo([",
+            "      StringTable(",
+            "        '040904B0',",
+            "        [",
+            "          StringStruct('CompanyName', 'ekisui-pdf contributors'),",
+            "          StringStruct('FileDescription', 'ekisui-pdf'),",
+            f"          StringStruct('FileVersion', '{__version__}'),",
+            "          StringStruct('InternalName', 'ekisui-pdf'),",
+            "          StringStruct('OriginalFilename', 'ekisui-pdf.exe'),",
+            "          StringStruct('ProductName', 'ekisui-pdf'),",
+            f"          StringStruct('ProductVersion', '{__version__}')",
+            "        ]",
+            "      )",
+            "    ]),",
+            "    VarFileInfo([VarStruct('Translation', [1033, 1200])])",
+            "  ]",
+            ")",
+            "",
+        ]
+    ),
+    encoding="utf-8",
+)
 
 datas = [
     ("models/ppocrv5", "models/ppocrv5"),
@@ -115,6 +162,7 @@ exe = EXE(
     exclude_binaries=True,
     name="ekisui-pdf",
     icon=str(_icon),
+    version=str(_version_file),
     console=False,
     # A crash dialog would block the installer job, which waits for this exe.
     disable_windowed_traceback=True,

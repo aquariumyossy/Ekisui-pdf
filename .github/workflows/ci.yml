@@ -67,15 +67,23 @@ jobs:
         run: |
           python tools/check_exe_icon.py dist\ekisui-pdf\ekisui-pdf.exe assets\icon\ekisui.ico
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python tools/check_exe_icon.py dist\ekisui-pdf-0.1.0-win64-setup.exe assets\icon\ekisui.ico
+          python tools/check_exe_icon.py dist\ekisui-pdf-1.0.0-win64-setup.exe assets\icon\ekisui.ico
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: File version
+        run: |
+          $exe = (Get-Item dist\ekisui-pdf\ekisui-pdf.exe).VersionInfo.FileVersion
+          $setup = (Get-Item dist\ekisui-pdf-1.0.0-win64-setup.exe).VersionInfo.FileVersion
+          Write-Host "FILE_VERSION $exe"
+          Write-Host "SETUP_VERSION $setup"
+          if ($exe -notlike "1.0.0*") { exit 1 }
+          if ($setup -notlike "1.0.0*") { exit 1 }
       - name: SHA-256
         run: |
-          Get-FileHash dist\ekisui-pdf-0.1.0-win64-setup.exe -Algorithm SHA256 | Format-List
-          $setup = (Get-Item dist\ekisui-pdf-0.1.0-win64-setup.exe).Length
+          Get-FileHash dist\ekisui-pdf-1.0.0-win64-setup.exe -Algorithm SHA256 | Format-List
+          $setup = (Get-Item dist\ekisui-pdf-1.0.0-win64-setup.exe).Length
           Write-Host "SETUP_BYTES $setup"
       - uses: actions/upload-artifact@v4
         with:
-          name: ekisui-pdf-0.1.0-win64-setup
-          path: dist/ekisui-pdf-0.1.0-win64-setup.exe
+          name: ekisui-pdf-1.0.0-win64-setup
+          path: dist/ekisui-pdf-1.0.0-win64-setup.exe
           if-no-files-found: error

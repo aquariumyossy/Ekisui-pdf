@@ -22,7 +22,7 @@
 
 ## インストール
 
-1. 配布された `ekisui-pdf-0.1.0-win64-setup.exe` の SHA-256 を、下の手順で照合する
+1. 配布された `ekisui-pdf-1.0.0-win64-setup.exe` の SHA-256 を、下の手順で照合する
 2. インストーラを実行する
 3. スタートメニューの「ekisui-pdf」から起動する
 
@@ -42,10 +42,10 @@
 PowerShell で、インストーラを保存したフォルダに移動して次を実行します。
 
 ```powershell
-Get-FileHash .\ekisui-pdf-0.1.0-win64-setup.exe -Algorithm SHA256
+Get-FileHash .\ekisui-pdf-1.0.0-win64-setup.exe -Algorithm SHA256
 ```
 
-表示されたハッシュが、配布元の一覧と一致することを確認してください。GitHub Actions の `installer` ジョブのログにも、同じ `Get-FileHash` の結果が出ます。アーティファクト名は `ekisui-pdf-0.1.0-win64-setup` です。
+表示されたハッシュが、配布元の一覧と一致することを確認してください。GitHub Actions の `installer` ジョブのログにも、同じ `Get-FileHash` の結果が出ます。アーティファクト名は `ekisui-pdf-1.0.0-win64-setup` です。
 
 このリポジトリは非公開のままです。リリースは作っていません。画面を確認してから公開するかどうか決めてください。
 

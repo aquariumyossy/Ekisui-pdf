@@ -38,6 +38,7 @@ def _wordish_pdf(path: Path) -> None:
     page.insert_textbox(pymupdf.Rect(72, 360, 420, 420), "佐藤花子", fontname="japan", fontsize=14)
     page.insert_text((72, 800), "03-1234-5678", fontname="japan", fontsize=12)
     document.set_metadata({"author": "WORD_AUTHOR"})
+    page.insert_link({"kind": pymupdf.LINK_URI, "from": pymupdf.Rect(72, 200, 180, 220), "uri": "mailto:secret@example.test"})
     document.save(path)
     document.close()
 
@@ -53,12 +54,13 @@ class _View:
 class _Doc:
     def __init__(self) -> None:
         self.ActiveWindow = type("Window", (), {"View": _View()})()
-        self.export = None
+        self.export_args = None
         self.closed = None
         self.saved = False
 
-    def ExportAsFixedFormat(self, **kwargs) -> None:
-        self.export = kwargs
+    def ExportAsFixedFormat(self, *args, **kwargs) -> None:
+        self.export_args = args
+        self.export_kwargs = kwargs
 
     def Close(self, **kwargs) -> None:
         self.closed = kwargs
@@ -70,18 +72,23 @@ class _Doc:
 class _Documents:
     def __init__(self, document: _Doc) -> None:
         self.document = document
-        self.opened = None
+        self.opened_args = None
+        self.security_at_open = None
 
-    def Open(self, **kwargs):
-        self.opened = kwargs
+    def Open(self, *args, **kwargs):
+        self.opened_args = args
+        self.opened_kwargs = kwargs
+        self.security_at_open = self.word.AutomationSecurity
         return self.document
 
 
 class _Word:
     def __init__(self) -> None:
         self.Documents = _Documents(_Doc())
+        self.Documents.word = self
         self.Visible = True
         self.DisplayAlerts = 1
+        self.AutomationSecurity = 1
 
 
 def test_export_asks_for_the_final_view_without_markup_or_properties(tmp_path):
@@ -91,15 +98,20 @@ def test_export_asks_for_the_final_view_without_markup_or_properties(tmp_path):
     _export_with_application(word, source, tmp_path / "out.pdf")
     assert word.Visible is False
     assert word.DisplayAlerts == 0
-    opened = word.Documents.opened
-    assert opened["ReadOnly"] is True
-    assert opened["FileName"] == str(source)
-    assert opened["AddToRecentFiles"] is False
-    export = word.Documents.document.export
-    assert export["ExportFormat"] == 17
-    assert export["Item"] == 0
-    assert export["IncludeDocProps"] is False
-    assert export["OpenAfterExport"] is False
+    assert word.Documents.security_at_open == 3
+    opened = word.Documents.opened_args
+    assert opened[0] == str(source)
+    assert opened[2] is True
+    assert opened[3] is False
+    assert opened[4] == "ekisui"
+    assert opened[14] is True
+    export = word.Documents.document.export_args
+    assert export[1] == 17
+    assert export[7] == 0
+    assert export[8] is False
+    assert export[9] is False
+    assert export[12] is False
+    assert export[2] is False
     view = word.Documents.document.ActiveWindow.View
     assert view.RevisionsView == 0
     assert view.ShowRevisionsAndComments is False
@@ -109,7 +121,8 @@ def test_export_asks_for_the_final_view_without_markup_or_properties(tmp_path):
     assert source.read_bytes() == b"original-bytes"
 
 
-def test_convert_without_word_raises_in_japanese_and_keeps_the_file(tmp_path):
+def test_convert_without_word_raises_in_japanese_and_keeps_the_file(tmp_path, monkeypatch):
+    monkeypatch.setattr("ekisui.pdf.wordconvert.sys.platform", "linux")
     source = tmp_path / "メモ.docx"
     source.write_bytes(b"do-not-touch")
     with pytest.raises(WordConvertError) as caught:
@@ -125,10 +138,12 @@ def test_converted_pdf_drops_the_author(tmp_path):
     opened = pymupdf.open(path)
     try:
         assert (opened.metadata or {}).get("author") in {None, ""}
+        assert list(opened[0].get_links()) == []
         raw = path.read_bytes()
     finally:
         opened.close()
     assert b"WORD_AUTHOR" not in raw
+    assert b"secret@example.test" not in raw
 
 
 def test_redaction_removes_header_footer_and_textbox_text(tmp_path):

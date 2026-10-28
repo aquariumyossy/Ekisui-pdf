@@ -22,6 +22,18 @@ def resource_path(*parts: str) -> Path:
     return packaged
 
 
+def icon_file() -> Path:
+    """Multi-size ICO. Dev checkout and the frozen app both keep it."""
+    bundled_name = Path("assets") / "icon" / "ekisui.ico"
+    root = _meipass()
+    if root is not None:
+        bundled = root / bundled_name
+        if bundled.is_file():
+            return bundled
+    repo = Path(__file__).resolve().parents[2] / bundled_name
+    return repo
+
+
 def model_dir() -> Path:
     env = os.environ.get("EKISUI_MODEL_DIR")
     if env:

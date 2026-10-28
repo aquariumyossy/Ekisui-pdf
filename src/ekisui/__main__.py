@@ -22,6 +22,7 @@ def main() -> int:
     from PySide6.QtGui import QFont, QFontDatabase
     from PySide6.QtWidgets import QApplication
 
+    from ekisui.gui.icon import load_app_icon
     from ekisui.gui.theme import QSS
     from ekisui.gui.window import MainWindow
 
@@ -46,6 +47,7 @@ def main() -> int:
             break
     app.setFont(font)
     app.setStyleSheet(QSS)
+    app.setWindowIcon(load_app_icon())
     window = MainWindow()
     window.show()
     if len(sys.argv) > 1 and Path(sys.argv[1]).suffix.lower() in {".pdf", ".doc", ".docx"}:

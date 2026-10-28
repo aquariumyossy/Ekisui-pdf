@@ -19,7 +19,8 @@ OutputBaseFilename=ekisui-pdf-0.1.0-win64-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-UninstallDisplayIcon={app}\{#MyAppExe}
+SetupIconFile=..\assets\icon\ekisui.ico
+UninstallDisplayIcon={app}\ekisui.ico
 LicenseFile=..\LICENSE
 InfoBeforeFile=..\THIRD_PARTY_NOTICES.md
 
@@ -30,10 +31,11 @@ Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 Source: "..\dist\ekisui-pdf\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\assets\icon\ekisui.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; IconFilename: "{app}\ekisui.ico"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; IconFilename: "{app}\ekisui.ico"
 
 [Run]
 Filename: "{app}\{#MyAppExe}"; Description: "ekisui-pdf を起動する"; Flags: nowait postinstall skipifsilent

@@ -63,6 +63,10 @@ jobs:
       - name: Installer
         run: |
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\ekisui-pdf.iss
+      - name: Icon resources
+        run: |
+          python tools/check_exe_icon.py dist\ekisui-pdf\ekisui-pdf.exe assets\icon\ekisui.ico
+          python tools/check_exe_icon.py dist\ekisui-pdf-0.1.0-win64-setup.exe assets\icon\ekisui.ico
       - name: SHA-256
         run: |
           Get-FileHash dist\ekisui-pdf-0.1.0-win64-setup.exe -Algorithm SHA256 | Format-List

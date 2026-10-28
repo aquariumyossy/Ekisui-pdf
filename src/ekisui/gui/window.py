@@ -45,6 +45,7 @@ from ekisui.domain.types import (
     TextSource,
 )
 from ekisui.errors import EkisuiError, WordConvertError
+from ekisui.gui.icon import load_app_icon
 from ekisui.gui.pageview import PageCanvas, PageView
 from ekisui.gui.zoom import scroll_to_keep_point
 from ekisui.gui.panels import CandidatePanel, OcrPanel, TablePanel
@@ -92,6 +93,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("ekisui-pdf")
+        self.setWindowIcon(load_app_icon())
         self.resize(1280, 800)
         self.setAcceptDrops(True)
         self.session: Session | None = None

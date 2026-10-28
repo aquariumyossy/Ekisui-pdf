@@ -40,6 +40,10 @@ datas = [pair for pair in datas if _keep_pair(pair)]
 binaries = [pair for pair in binaries if _keep_pair(pair)]
 hidden = [name for name in hidden if not excluded_module(name)]
 
+_icon = Path(SPECPATH) / "assets" / "icon" / "ekisui.ico"
+if _icon.is_file():
+    datas.append((str(_icon), "assets/icon"))
+
 if sys.platform == "win32":
     import PySide6
 
@@ -109,6 +113,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="ekisui-pdf",
+    icon=str(_icon) if _icon.is_file() else None,
     console=False,
     # A crash dialog would block the installer job, which waits for this exe.
     disable_windowed_traceback=True,

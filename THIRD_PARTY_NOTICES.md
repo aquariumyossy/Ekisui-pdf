@@ -53,6 +53,17 @@ PyMuPDF（AGPL）を使っているため、このアプリ全体を AGPL-3.0 �
 - ライセンス: HPND（MIT に近い寛容なライセンス）
 - https://python-pillow.org/
 
+## アプリアイコンの字形（Noto CJK）
+
+アイコンの「蕭」は、次のフォントのアウトラインを図形にしたものです。フォントファイル自体は同梱していません。
+
+- 16・24・32・48: Noto Sans CJK JP Bold 2.004
+- 64・128・256 と 1024 の明朝マスター: Noto Serif CJK JP
+- 著作権: Copyright © 2014-2021 Adobe. Reserved Font Name「Source」
+- ライセンス: SIL Open Font License 1.1
+- 全文: `assets/icon/OFL-NotoSansCJKJP.txt`、`assets/icon/OFL-NotoSerifCJKJP.txt`
+- https://github.com/notofonts/noto-cjk
+
 ## 姓の一覧
 
 `src/ekisui/resources/surnames.txt` は、公開されている同姓調査（明治安田生命「全国同姓調査」など）で繰り返し上位に挙がる姓を、事実の列挙としてまとめたものです。特定のデータベースの複製ではありません。表記ゆれ（渡辺/渡邊、斎藤/斉藤など）は別の行にしています。

@@ -4,6 +4,8 @@
 
 ライセンスは **AGPL-3.0** です。PDF の処理に PyMuPDF を使っているため、アプリ全体をこのライセンスで配布します。`LICENSE` と `THIRD_PARTY_NOTICES.md` を同梱しています。
 
+アイコンの「蕭」は、Noto Sans CJK JP（小さいサイズ）と Noto Serif CJK JP（大きいサイズ）の字形です。ライセンスは SIL Open Font License 1.1 で、全文は `assets/icon/` にあります。
+
 ## 免責
 
 このソフトには保証がありません。作者は、消し残し、誤った墨消し、OCR の読み間違い、その他このソフトを使った結果について、一切責任を負いません。

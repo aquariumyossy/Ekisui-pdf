@@ -228,9 +228,9 @@ class PageCanvas(QWidget):
         return None
 
     def cancel_edit(self) -> None:
-        editor_focused = self.editor.hasFocus()
+        child_focused = self.editor.hasFocus() or self.ok_button.hasFocus()
         self._edit_line = ""
-        if editor_focused:
+        if child_focused:
             self.setFocus()
         self.editor.hide()
         self.ok_button.hide()
@@ -277,6 +277,7 @@ class PageCanvas(QWidget):
         if not self.selected_hit:
             return
         self.selected_hit = ""
+        self._handle = None
         self.update()
         self.hitSelected.emit("")
 

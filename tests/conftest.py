@@ -1,8 +1,9 @@
 """Stop a test that never returns.
 
-Offscreen Qt can block forever inside a menu that tries to grab the keyboard.
-The alarm fails that test instead of leaving the run stuck. Windows has no
-SIGALRM; the guard is the Unix CI and local runs.
+A Python alarm fires only when the interpreter next runs. It does not
+interrupt a Qt menu that has grabbed the keyboard and never returns.
+Handle tests therefore avoid QMenu.exec. The alarm still stops a test
+that is stuck in Python. Windows has no SIGALRM.
 """
 
 import signal

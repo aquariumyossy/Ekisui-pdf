@@ -43,6 +43,8 @@ def is_remote(target: str) -> bool:
         return True
     if lowered.startswith("file:"):
         after = text[5:]
+        if after.startswith("\\\\"):
+            return True
         slashes = len(after) - len(after.lstrip("/"))
         rest = after.lstrip("/")
         if re.match(r"^[A-Za-z]:[\\/]", rest) or rest.lower().startswith(("localhost", "127.0.0.1")):
@@ -224,7 +226,14 @@ def _rewrite_document_part(data: bytes, dropped: set[str]) -> bytes:
 
 
 _FETCH_FIELD = re.compile(r"\b(INCLUDEPICTURE|INCLUDETEXT|DDEAUTO|DATABASE|IMPORT|DDE|LINK)\b", re.IGNORECASE)
-_REL_TAG = re.compile(r"<(?:[\w.]+:)?Relationship\b[^>]*/>", re.IGNORECASE)
+_REL_TAG = re.compile(
+    r"<(?:[\w.]+:)?Relationship\b[^>]*/>|<(?:[\w.]+:)?Relationship\b[^>]*>.*?</(?:[\w.]+:)?Relationship\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_URL_ATTR = re.compile(
+    r"""(\s(?:[\w.]+:)?(?:src|href)\s*=\s*)(["'])(.*?)\2""",
+    re.IGNORECASE | re.DOTALL,
+)
 _INSTR_TEXT = re.compile(r"(<(?:[\w.]+:)?instrText\b[^>]*>)(.*?)(</(?:[\w.]+:)?instrText\s*>)", re.IGNORECASE | re.DOTALL)
 
 
@@ -360,6 +369,8 @@ def _lock_field_begins(xml: str) -> str:
         named = re.match(r"<([\w.]+:)?fldChar\b", tag, re.IGNORECASE)
         if named and named.group(1):
             prefix = named.group(1)
+        if tag.endswith("/>"):
+            return tag[:-2] + f' {prefix}fldLock="true"/>'
         return tag[:-1] + f' {prefix}fldLock="true">'
 
     return re.sub(r"<(?:[\w.]+:)?fldChar\b[^>]*>", repl, xml, flags=re.IGNORECASE)
@@ -367,12 +378,12 @@ def _lock_field_begins(xml: str) -> str:
 
 def _scrub_remote_attrs(xml: str) -> str:
     def repl(match: re.Match[str]) -> str:
-        url = html.unescape(match.group(2))
+        url = html.unescape(match.group(3))
         if is_remote(url) or contains_remote(url):
-            return match.group(1) + match.group(3)
+            return match.group(1) + match.group(2) + match.group(2)
         return match.group(0)
 
-    return re.sub(r"(\s(?:[\w.]+:)?(?:src|href)\s*=\s*\")([^\"]*)(\")", repl, xml, flags=re.IGNORECASE)
+    return _URL_ATTR.sub(repl, xml)
 
 
 def _strip_relationship_ids(xml: str, dropped: set[str]) -> str:
@@ -416,11 +427,7 @@ def _remove_balanced(xml: str, local: str) -> str:
 
 
 def _markup_urls(xml: str) -> list[str]:
-    return [html.unescape(match.group(1)) for match in re.finditer(
-        r"\s(?:[\w.]+:)?(?:src|href)\s*=\s*\"([^\"]*)\"",
-        xml,
-        re.IGNORECASE,
-    )]
+    return [html.unescape(match.group(3)) for match in _URL_ATTR.finditer(xml)]
 
 
 def _attr_value(blob: str, name: str) -> str | None:

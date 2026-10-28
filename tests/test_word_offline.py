@@ -16,6 +16,47 @@ from ekisui.pdf.wordlinks import (
 )
 
 
+def test_single_quoted_vml_and_explicit_relationship_are_removed(tmp_path) -> None:
+    document = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p><w:r><w:t>残す</w:t></w:r></w:p>
+    <w:p><w:r><v:imagedata r:id="rId7" src='http://example.invalid/single.png'/></w:r></w:p>
+  </w:body>
+</w:document>
+"""
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="http://example.invalid/photo.png" TargetMode="External"></Relationship>
+</Relationships>
+"""
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>
+"""
+    package = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>
+"""
+    source = tmp_path / "quoted.docx"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", package)
+        archive.writestr("word/document.xml", document)
+        archive.writestr("word/_rels/document.xml.rels", rels)
+    source.write_bytes(buffer.getvalue())
+    dest = tmp_path / "clean.docx"
+    neutralize_docx(source, dest)
+    blob = "\n".join(_parts(dest.read_bytes()).values())
+    assert "残す" in blob
+    assert "example.invalid" not in blob
+    assert "single.png" not in blob
+    assert "photo.png" not in blob
+
+
 def test_remote_forms() -> None:
     assert is_remote("file:////fileserver/share/secret.dotx")
     assert is_remote("file://fileserver/share/secret.dotx")

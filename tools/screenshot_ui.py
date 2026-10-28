@@ -14,12 +14,12 @@ sys.path.insert(0, str(ROOT / "src"))
 
 import pymupdf  # noqa: E402
 from PySide6.QtCore import QPoint, Qt  # noqa: E402
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPen  # noqa: E402
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QPainter, QPen  # noqa: E402
 from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
 
 from ekisui.domain.types import TextLine, TextSource  # noqa: E402
 from ekisui.gui.theme import QSS  # noqa: E402
-from ekisui.gui.window import MainWindow  # noqa: E402
+from ekisui.gui.window import SETTINGS_FUZZY_TIP, MainWindow  # noqa: E402
 from ekisui.pdf.verify import verify_pdf  # noqa: E402
 from dataclasses import replace  # noqa: E402
 
@@ -177,20 +177,38 @@ def main() -> None:
     window._open_settings()
     QApplication.processEvents()
     info = next(button for button in window.shade.findChildren(QPushButton) if button.objectName() == "info")
+    text = info.toolTip()
+    if text != SETTINGS_FUZZY_TIP:
+        raise SystemExit("settings tooltip is not the fuzzy-match wording")
     shot = window.grab()
-    anchor = info.mapTo(window, QPoint(0, info.height() + 6))
     painter = QPainter(shot)
     painter.setPen(QPen(QColor("#1b1b1b")))
     painter.setBrush(QColor("#fffef6"))
-    text = info.toolTip()
-    rect_width = 460
-    rect_height = 72
-    painter.drawRoundedRect(anchor.x(), anchor.y(), rect_width, rect_height, 6, 6)
+    font = QFont(painter.font())
+    font.setPixelSize(14)
+    painter.setFont(font)
+    metrics = QFontMetrics(font)
+    rect_width = min(680, shot.width() - 24)
+    bounds = metrics.boundingRect(
+        0,
+        0,
+        rect_width - 24,
+        2000,
+        int(Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap),
+        text,
+    )
+    rect_height = bounds.height() + 22
+    dialog_origin = window.dialog.mapTo(window, QPoint(0, 0))
+    x = max(12, min(dialog_origin.x(), shot.width() - rect_width - 12))
+    y = dialog_origin.y() + window.dialog.height() + 12
+    if y + rect_height > shot.height() - 12:
+        y = max(12, shot.height() - rect_height - 12)
+    painter.drawRoundedRect(x, y, rect_width, rect_height, 6, 6)
     painter.drawText(
-        anchor.x() + 10,
-        anchor.y() + 8,
-        rect_width - 20,
-        rect_height - 16,
+        x + 12,
+        y + 10,
+        rect_width - 24,
+        rect_height - 18,
         int(Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap),
         text,
     )

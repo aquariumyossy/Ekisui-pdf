@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QSplitter,
@@ -54,6 +55,33 @@ from ekisui.pdf.wordconvert import convert_word_to_pdf
 from ekisui.pdf.export import export_pdf, redaction_boxes, unique_destination
 from ekisui.pdf.ocr_engine import PpOcrV5
 from ekisui.pdf.verify import VerifyReport, verify_pdf
+
+SETTINGS_TITLE = "マスキングの設定"
+SETTINGS_HEADING_READ = "読み取りの誤りを見込んで探す"
+SETTINGS_HEADING_BOX = "マスキング枠"
+SETTINGS_FUZZY_LOW = "幅広く拾う"
+SETTINGS_FUZZY_HIGH = "厳密"
+SETTINGS_REVIEW_LABEL = "読み取りの自信がこの％未満の行を要確認にする"
+SETTINGS_ALIGN_LABEL = "短い枠を広げる最小の幅（文字数）"
+SETTINGS_FUZZY_TIP = (
+    "OCRは『山田』を『山出』と読むなど、読み誤ることがあります。"
+    "そうした少し違う表記も同じ語句として見つけ、マスキングします。"
+    "％を下げるほど違いの大きい表記まで拾い、消し残りは減りますが、関係ない語句も増えます。"
+    "4文字以上の語句に効きます。2〜3文字の語句は、紛らわしい1文字の違いだけを同じとみなします。"
+)
+SETTINGS_REVIEW_TIP = "OCRの自信が低い行に赤い枠を付け、目で確かめる対象にします。数字を上げると要確認の行が増えます。手で直した行は対象外です。"
+SETTINGS_ALIGN_TIP = (
+    "短い語句の黒塗りや置換の枠を、この文字数まで広げます。"
+    "枠の長さから元の語句を推測されにくくするためです。長い枠は縮めません。"
+    "保存時の『枠の幅をそろえる』がオンのときに効きます。"
+)
+SETTINGS_BUTTON_TIP = "マスキングの設定です。読み取りの誤りがあっても同じ語句を見つける度合いと、枠の幅を変えます。"
+_DIALOG_WIDTH = 540
+_SETTINGS_DIALOG_WIDTH = 720
+
+
+def fuzzy_caption(value: int) -> str:
+    return f"少し違う表記も同じ語句とみなす（{value}%）"
 
 
 def _mark(widget: QWidget, kind: str) -> QWidget:
@@ -266,7 +294,8 @@ class MainWindow(QMainWindow):
         offline.setObjectName("offline")
         offline.setToolTip("外部とは通信しません。読み取りもマスキングもこのPCの中で行います。")
         layout.addWidget(offline)
-        settings = self._tool("設定", "一致の厳しさや、マスキング枠の幅を変えます。", self._open_settings)
+        settings = self._tool("設定", SETTINGS_BUTTON_TIP, self._open_settings)
+        self.btn_settings = settings
         layout.addWidget(settings)
         self.ocr_pop = QFrame(self.centralWidget())
         self.ocr_pop.setObjectName("pop")
@@ -367,7 +396,7 @@ class MainWindow(QMainWindow):
         shade_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.dialog = QFrame()
         self.dialog.setObjectName("dialog")
-        self.dialog.setFixedWidth(540)
+        self.dialog.setFixedWidth(_DIALOG_WIDTH)
         self.dialog.setMaximumHeight(640)
         self.dialog_layout = QVBoxLayout(self.dialog)
         self.dialog_layout.setContentsMargins(18, 16, 18, 16)
@@ -1618,21 +1647,28 @@ class MainWindow(QMainWindow):
     def _open_settings(self) -> None:
         current = self.session.settings if self.session else self.settings
         self._clear_dialog()
-        title = QLabel("設定")
+        self.dialog.setFixedWidth(_SETTINGS_DIALOG_WIDTH)
+        self.dialog.setMaximumHeight(760)
+        title = QLabel(SETTINGS_TITLE)
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
+        title.setWordWrap(True)
         self.fuzzy = QSlider(Qt.Orientation.Horizontal)
         self.fuzzy.setRange(50, 90)
         self.fuzzy.setValue(round(current.fuzzy_threshold * 100))
-        self.fuzzy_label = QLabel(f"ゆるい一致 {self.fuzzy.value()}%")
-        self.fuzzy.valueChanged.connect(lambda value: self.fuzzy_label.setText(f"ゆるい一致 {value}%"))
+        self.fuzzy_label = QLabel(fuzzy_caption(self.fuzzy.value()))
+        self.fuzzy_label.setWordWrap(True)
+        self.fuzzy.valueChanged.connect(lambda value: self.fuzzy_label.setText(fuzzy_caption(value)))
         self.review = QSpinBox()
         self.review.setRange(50, 99)
+        self.review.setSuffix("%")
         self.review.setValue(round(current.review_below * 100))
-        self.review_label = QLabel("要確認にする信頼度（%）")
+        self.review_label = QLabel(SETTINGS_REVIEW_LABEL)
+        self.review_label.setWordWrap(True)
         self.align = QSpinBox()
         self.align.setRange(1, 12)
         self.align.setValue(current.align_chars)
-        self.align_label = QLabel("枠の幅（文字数）")
+        self.align_label = QLabel(SETTINGS_ALIGN_LABEL)
+        self.align_label.setWordWrap(True)
         buttons = QHBoxLayout()
         cancel = QPushButton("キャンセル")
         _mark(cancel, "btn")
@@ -1643,36 +1679,70 @@ class MainWindow(QMainWindow):
         buttons.addStretch(1)
         buttons.addWidget(cancel)
         buttons.addWidget(apply)
+        read_heading = self._settings_heading(SETTINGS_HEADING_READ)
+        box_heading = self._settings_heading(SETTINGS_HEADING_BOX)
         self.dialog_layout.addWidget(title)
-        self.dialog_layout.addWidget(self._info_row(
-            self.fuzzy_label,
-            "4文字以上だけに効きます（初期値60%）。下げると読み違いを多く拾い、上げると厳しい一致だけ残します。2〜3文字はこの％を使わず、全体が読み間違い表で一致する語句は残します。",
-        ))
-        self.dialog_layout.addWidget(self.fuzzy)
-        self.dialog_layout.addWidget(self._info_row(
-            self.review_label,
-            "この％未満の読み取り行を要確認にします（初期値80%）。上げると多くの行が対象になり、下げると自信のない行だけです。手で直した行は対象外です。",
-        ))
+        self.dialog_layout.addWidget(read_heading)
+        self.dialog_layout.addWidget(self._info_row(self.fuzzy_label, SETTINGS_FUZZY_TIP))
+        self.dialog_layout.addWidget(self._fuzzy_scale())
+        self.dialog_layout.addWidget(self._info_row(self.review_label, SETTINGS_REVIEW_TIP))
         self.dialog_layout.addWidget(self.review)
-        self.dialog_layout.addWidget(self._info_row(
-            self.align_label,
-            "短いマスキング枠の最小の幅です（初期値5文字）。上げると元の長さが分かりにくくなり、下げると実際の長さに近づきます。もともと広い枠は縮みません。",
-        ))
+        self.dialog_layout.addWidget(box_heading)
+        self.dialog_layout.addWidget(self._info_row(self.align_label, SETTINGS_ALIGN_TIP))
         self.dialog_layout.addWidget(self.align)
         self.dialog_layout.addLayout(buttons)
+        content_width = _SETTINGS_DIALOG_WIDTH - 36 - 22 - 16
+        for label in (title, read_heading, box_heading):
+            self._fit_wrapped(label, _SETTINGS_DIALOG_WIDTH - 36)
+        for label in (self.fuzzy_label, self.review_label, self.align_label):
+            self._fit_wrapped(label, content_width)
         self._show_shade()
+
+    def _settings_heading(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setStyleSheet("font-size: 15px; font-weight: 600; padding-top: 8px;")
+        return label
+
+    def _fuzzy_scale(self) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        low = QLabel(SETTINGS_FUZZY_LOW)
+        high = QLabel(SETTINGS_FUZZY_HIGH)
+        for caption in (low, high):
+            caption.setStyleSheet("color: #5c5c5c; font-size: 12px;")
+            caption.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        self.fuzzy.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        layout.addWidget(low)
+        layout.addWidget(self.fuzzy, 1)
+        layout.addWidget(high)
+        return row
+
+    def _fit_wrapped(self, label: QLabel, width: int) -> None:
+        metrics = label.fontMetrics()
+        single = metrics.horizontalAdvance(label.text())
+        if single <= width:
+            label.setMinimumWidth(single)
+            label.setMinimumHeight(metrics.height())
+            return
+        label.setMinimumWidth(width)
+        rect = metrics.boundingRect(0, 0, max(width, 1), 2000, int(Qt.TextFlag.TextWordWrap), label.text())
+        label.setMinimumHeight(max(rect.height(), metrics.height()))
 
     def _info_row(self, label: QLabel, tip: str) -> QWidget:
         row = QWidget()
         layout = QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
+        label.setWordWrap(True)
+        label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         info = QPushButton("i")
         info.setObjectName("info")
         info.setToolTip(tip)
         info.setCursor(Qt.CursorShape.PointingHandCursor)
         info.clicked.connect(lambda _checked=False, button=info, text=tip: QToolTip.showText(button.mapToGlobal(QPoint(0, button.height())), text, button))
-        layout.addWidget(label)
-        layout.addWidget(info)
+        layout.addWidget(label, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(info, 0, Qt.AlignmentFlag.AlignTop)
         layout.addStretch(1)
         return row
 
@@ -1690,6 +1760,8 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def _clear_dialog(self) -> None:
+        self.dialog.setFixedWidth(_DIALOG_WIDTH)
+        self.dialog.setMaximumHeight(640)
         self._discard_layout(self.dialog_layout)
 
     def _discard_layout(self, layout) -> None:

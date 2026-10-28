@@ -82,6 +82,28 @@ jobs:
           Get-FileHash dist\ekisui-pdf-1.0.0-win64-setup.exe -Algorithm SHA256 | Format-List
           $setup = (Get-Item dist\ekisui-pdf-1.0.0-win64-setup.exe).Length
           Write-Host "SETUP_BYTES $setup"
+      - name: Installed samples
+        run: |
+          $dest = Join-Path $env:TEMP "ekisui-install-samples"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          $setup = (Resolve-Path "dist\ekisui-pdf-1.0.0-win64-setup.exe").Path
+          $proc = Start-Process -FilePath $setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=$dest" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { Write-Host "INSTALL_EXIT $($proc.ExitCode)"; exit 1 }
+          $samples = Join-Path $dest "samples"
+          $pdfs = @(Get-ChildItem -LiteralPath $samples -Filter *.pdf)
+          if ($pdfs.Count -lt 2) { Write-Host "SAMPLE_MISSING"; exit 1 }
+          $scan = $pdfs | Sort-Object Length -Descending | Select-Object -First 1
+          $env:SAMPLE_SCAN = $scan.FullName
+          python -c "import os, pymupdf; doc = pymupdf.open(os.environ['SAMPLE_SCAN']); assert doc.page_count == 2; assert all(not page.get_text().strip() for page in doc); print('SAMPLE_INSTALLED', doc.page_count)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $masked = Join-Path $samples ($scan.BaseName + "_Masked.pdf")
+          Set-Content -LiteralPath $masked -Value "user saved" -Encoding ascii
+          $unins = Join-Path $dest "unins000.exe"
+          $removed = Start-Process -FilePath $unins -ArgumentList "/VERYSILENT","/NORESTART" -Wait -PassThru
+          if ($removed.ExitCode -ne 0) { Write-Host "UNINSTALL_EXIT $($removed.ExitCode)"; exit 1 }
+          if (Test-Path -LiteralPath $scan.FullName) { Write-Host "SAMPLE_STILL_THERE"; exit 1 }
+          if (-not (Test-Path -LiteralPath $masked)) { Write-Host "USER_FILE_REMOVED"; exit 1 }
+          Write-Host "SAMPLE_UNINSTALL_OK"
       - uses: actions/upload-artifact@v4
         with:
           name: ekisui-pdf-1.0.0-win64-setup

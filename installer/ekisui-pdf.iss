@@ -41,6 +41,8 @@ Source: "..\docs\images\02-ocr.png"; DestDir: "{app}\images"; Flags: ignoreversi
 Source: "..\docs\images\03-mask.png"; DestDir: "{app}\images"; Flags: ignoreversion
 Source: "..\docs\images\04-confirm.png"; DestDir: "{app}\images"; Flags: ignoreversion
 Source: "..\docs\images\05-save.png"; DestDir: "{app}\images"; Flags: ignoreversion
+Source: "..\samples\架空契約_スキャン.pdf"; DestDir: "{app}\samples"; Flags: ignoreversion
+Source: "..\samples\架空契約_テキスト.pdf"; DestDir: "{app}\samples"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; IconFilename: "{app}\ekisui.ico"

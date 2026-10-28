@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QLineEdit, QMenu, QPushButton, QScrollArea, QToolTip, QWidget
 
@@ -151,7 +151,6 @@ class PageCanvas(QWidget):
         self.ok_button.hide()
         self.ok_button.clicked.connect(self._confirm_edit)
         self._edit_line = ""
-        self._swallow_nav_key = False
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
 
@@ -229,7 +228,10 @@ class PageCanvas(QWidget):
         return None
 
     def cancel_edit(self) -> None:
+        editor_focused = self.editor.hasFocus()
         self._edit_line = ""
+        if editor_focused:
+            self.setFocus()
         self.editor.hide()
         self.ok_button.hide()
 
@@ -238,32 +240,25 @@ class PageCanvas(QWidget):
             return
         line_id = self._edit_line
         text = self.editor.text()
-        self._keep_edit_key()
         self.cancel_edit()
         self.editConfirmed.emit(line_id, text)
 
-    def _keep_edit_key(self) -> None:
-        """Enter or Esc just closed the line editor. Do not also drop the handles."""
-        self._swallow_nav_key = True
-        QTimer.singleShot(0, self._release_edit_key)
-
-    def _release_edit_key(self) -> None:
-        self._swallow_nav_key = False
-
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
-        if obj is self.editor and event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
-            self._keep_edit_key()
-            self.cancel_edit()
-            self.editCancelled.emit()
+        if obj is self.editor and event.type() == QEvent.Type.KeyPress and event.key() in (
+            Qt.Key.Key_Escape,
+            Qt.Key.Key_Return,
+            Qt.Key.Key_Enter,
+        ):
+            if event.key() == Qt.Key.Key_Escape:
+                self.cancel_edit()
+                self.editCancelled.emit()
+            else:
+                self._confirm_edit()
             return True
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
-        if self._swallow_nav_key and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape):
-            event.accept()
-            return
         if event.key() == Qt.Key.Key_Escape and self.editor.isVisible():
-            self._keep_edit_key()
             self.cancel_edit()
             self.editCancelled.emit()
             return

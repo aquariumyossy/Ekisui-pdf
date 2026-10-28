@@ -152,7 +152,13 @@ def test_enter_and_esc_stay_in_the_editor_and_the_search_box(tmp_path) -> None:
     QTest.keyClick(canvas.editor, Qt.Key.Key_Return)
     app.processEvents()
     assert canvas.editor.isHidden()
+    assert app.focusWidget() is canvas
     assert window.selected_hit == tracked.id
     assert tracked.adjusted is True
+    QTest.keyClick(app.focusWidget(), Qt.Key.Key_Return)
+    app.processEvents()
+    assert window.selected_hit == ""
+    assert tracked.adjusted is True
+    assert tracked.hit.surface == surface
     window.close()
     app.processEvents()

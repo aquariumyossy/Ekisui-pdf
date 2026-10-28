@@ -35,6 +35,8 @@ def build_page_index(page: Page, table: ConfusableTable) -> PageIndex:
         loose="".join(glyph.loose for glyph in glyphs),
         paragraphs=paragraphs,
         lines={line.id: line for line in page.lines},
+        width=page.width,
+        height=page.height,
     )
 
 
@@ -161,13 +163,33 @@ def is_page_wrap(left: Rect, right: Rect) -> bool:
     return abs(right.x0 - left.x0) <= max(72.0, height * 4)
 
 
+def _body_runs(page: PageIndex) -> list[tuple[int, int]]:
+    """Line runs that are not a header, footer, or page number."""
+    runs = []
+    for start, stop in line_runs(page):
+        glyphs = page.glyphs[start:stop]
+        if glyphs and not _furniture(page, glyphs):
+            runs.append((start, stop))
+    return runs or line_runs(page)
+
+
+def _furniture(page: PageIndex, glyphs: tuple[Glyph, ...] | list[Glyph]) -> bool:
+    text = "".join(glyph.strict for glyph in glyphs)
+    box = page.lines[glyphs[0].line_id].bbox
+    if text and len(text) <= 8 and all(ch.isdigit() or ch in "-－–—‐−" for ch in text):
+        return True
+    if page.height <= 0 or len(text) > 24:
+        return False
+    return box.y0 < 56 or box.y0 > page.height - 72
+
+
 def wrap_pairs(
     pages: tuple[PageIndex, ...] | list[PageIndex],
 ) -> list[tuple[tuple[PageIndex, int, int], tuple[PageIndex, int, int]]]:
     """Line pairs whose text should be read as one wrapped line."""
     pairs: list[tuple[tuple[PageIndex, int, int], tuple[PageIndex, int, int]]] = []
     for page in pages:
-        runs = line_runs(page)
+        runs = _body_runs(page)
         for (start, stop), (nxt, nxt_stop) in zip(runs, runs[1:]):
             left = page.lines[page.glyphs[start].line_id].bbox
             right = page.lines[page.glyphs[nxt].line_id].bbox
@@ -176,8 +198,8 @@ def wrap_pairs(
     for previous, nxt in zip(pages, pages[1:]):
         if not previous.glyphs or not nxt.glyphs:
             continue
-        last = line_runs(previous)[-1]
-        first = line_runs(nxt)[0]
+        last = _body_runs(previous)[-1]
+        first = _body_runs(nxt)[0]
         left = previous.lines[previous.glyphs[last[0]].line_id].bbox
         right = nxt.lines[nxt.glyphs[first[0]].line_id].bbox
         if is_page_wrap(left, right):

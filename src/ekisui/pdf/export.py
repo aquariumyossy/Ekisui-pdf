@@ -60,7 +60,7 @@ def redaction_boxes(
                             page,
                             _widen_short(tracked.hit, rect, options.align_box_width),
                             settings.align_chars,
-                            exact=bool(tracked.hit.parts),
+                            exact=bool(tracked.hit.parts) and page.kind != PageKind.SCANNED,
                         ),
                         action=action,
                         pseudonym=pseudonym,

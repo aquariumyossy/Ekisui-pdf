@@ -248,6 +248,8 @@ class PageIndex:
     loose: str
     paragraphs: tuple[tuple[int, int], ...]
     lines: dict[str, TextLine]
+    width: float = 0.0
+    height: float = 0.0
 
 
 @dataclass(frozen=True)

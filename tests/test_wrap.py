@@ -54,6 +54,101 @@ def test_page_break_covers_the_wrapped_vowel():
         assert sum(len(hit.parts) for hit in hits) == 2
 
 
+def test_page_number_and_header_do_not_hide_the_wrap(tmp_path):
+    path = tmp_path / "見出し.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((250, 36), "- 1 -", fontname="helv", fontsize=10)
+    page.insert_text((56, 700), "開示者は専門アドバイザ", fontname="japan", fontsize=10.5)
+    page2 = doc.new_page(width=595, height=842)
+    page2.insert_text((56, 40), "秘密保持契約書", fontname="japan", fontsize=10.5)
+    page2.insert_text((56, 96), "ーに開示できる。", fontname="japan", fontsize=10.5)
+    page2.insert_text((250, 810), "- 2 -", fontname="helv", fontsize=10)
+    doc.save(path)
+    doc.close()
+    opened = open_document(path)
+    session = Session(opened, Settings(fuzzy_threshold=0.60))
+    group = session.add_phrase(TERM)
+    assert group is not None
+    assert {tracked.hit.page_index for tracked in group.included_hits()} == {0, 1}
+    dest = tmp_path / "見出し_Masked.pdf"
+    export_pdf(
+        opened,
+        session.groups,
+        dest,
+        SaveOptions(align_box_width=False, strip_metadata=True, export_log=False, export_replacement_table=False),
+        session.settings,
+    )
+    saved = "\n".join(page.get_text("text") for page in pymupdf.open(dest))
+    assert "専門アドバイザ" not in saved
+    assert "秘密保持契約書" in saved
+    assert "に開示できる" in saved
+    assert not any(line.strip().startswith("ー") for line in saved.splitlines())
+    report = verify_pdf(str(dest), session.groups, session.settings, session.table, False)
+    assert report.clean, [(item.term, item.explanation) for item in report.leftovers]
+
+
+def test_wrapped_term_is_not_dropped_beside_another_name():
+    document = document_from_lines(
+        [["山田太郎は当該役職員または専門アドバイザ", "ーの選任を監督する。"]],
+        gap=32.0,
+    )
+    session = Session(document, Settings())
+    session.suggest()
+    assert session.add_phrase(TERM) is not None
+    session.rescan()
+    surfaces = [strict_text(hit.hit.surface) for group in session.groups for hit in group.included_hits()]
+    assert TERM in surfaces
+    assert any("山田" in surface for surface in surfaces)
+
+
+def test_masking_joins_a_given_name_split_across_a_wrap():
+    document = document_from_lines([["受領者は山田太", "郎に通知する。"]], gap=32.0)
+    session = Session(document, Settings())
+    session.suggest()
+    people = [group.canonical for group in session.groups if "山田" in group.canonical]
+    assert any(strict_text(name) == "山田太郎" for name in people), people
+
+
+def test_ocr_rebind_moves_every_part():
+    from dataclasses import replace
+
+    from ekisui.domain.types import PageKind
+
+    document = document_from_lines([["山田太郎"]])
+    page = document.pages[0]
+    old = replace(document, pages=(replace(page, kind=PageKind.SCANNED, image_path="old.png"),))
+    session = Session(old, Settings())
+    original = Rect(72, 72, 140, 88)
+    hit = Hit(
+        0,
+        "山田太郎",
+        original,
+        MatchKind.EXACT,
+        1.0,
+        "",
+        ("p0l0",),
+        parts=(original,),
+    )
+    session.groups.append(
+        TermGroup(
+            id="g",
+            canonical="山田太郎",
+            category=Category.PERSON,
+            action=Action.REPLACE,
+            pseudonym="個人甲",
+            hits=[TrackedHit("h", hit, True)],
+            origin="region",
+        )
+    )
+    moved = replace(page, kind=PageKind.SCANNED, image_path="new.png", skew=3.0)
+    session.document = replace(old, pages=(moved,))
+    session.rebind_after_ocr(old)
+    kept = [item.hit for group in session.groups for item in group.hits if item.hit.parts]
+    assert kept
+    assert all(part != original for hit in kept for part in hit.parts)
+
+
 def test_a_blank_gap_still_does_not_join():
     table = load_confusables()
     document = document_from_lines([["株式会社サ", "ンプル商事"]], gap=40.0)
@@ -181,8 +276,7 @@ def test_scanned_pdf_redacts_a_wrapped_term(tmp_path):
     )
     saved = "\n".join(page.get_text("text") for page in pymupdf.open(dest))
     assert "専門アドバイザ" not in saved
-    if any(line.startswith("ー") for line in read.splitlines()):
-        assert not any(line.startswith("ー") for line in saved.splitlines()), saved
+    assert not any(line.strip().startswith(("ー", "一")) for line in saved.splitlines()), saved
     report = verify_pdf(str(dest), session.groups, session.settings, session.table, False)
     assert report.clean, [(item.term, item.explanation) for item in report.leftovers]
 

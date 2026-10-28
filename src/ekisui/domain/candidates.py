@@ -501,11 +501,12 @@ def _spans_across_wrap(
     def add(local_start: int, local_end: int, category: Category, pattern: re.Pattern[str], haystack: str) -> None:
         if local_end <= join or local_start >= join or local_end <= local_start:
             return
-        # A token that already ends on this line is not a wrap. Extending it
-        # would swallow the next line (株式会社サンプル商事 / 被告…).
+        # A finished token followed by 被告 or a particle is the next phrase.
+        # 山田太 / 郎 and 株式会社サンプル / 商事 still cross.
         left = haystack[local_start:join]
+        right = haystack[join:local_end]
         done = pattern.match(left)
-        if done is not None and done.end() == len(left):
+        if done is not None and done.end() == len(left) and not _wrap_continues(right):
             return
         surface = text[local_start:local_end]
         if left_page.page_index == right_page.page_index and left_stop == right_start:
@@ -549,6 +550,12 @@ def _spans_across_wrap(
             continue
         add(match.start(), match.end(), Category.PERSON, person_re, text)
     return found
+
+
+def _wrap_continues(text: str) -> bool:
+    if not text:
+        return False
+    return text[0] not in "はをがにでとものへや被原甲乙電連口管住第記以"
 
 
 def _piece_span(

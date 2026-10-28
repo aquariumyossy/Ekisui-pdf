@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pymupdf
 
-from ekisui.domain.index import build_document_index, is_line_wrap, is_page_wrap, line_runs, parts_of
+from ekisui.domain.index import build_document_index, parts_of, wrap_pairs
 from ekisui.domain.match import search_pages
 from ekisui.domain.normalize import ConfusableTable, strict_text
 from ekisui.domain.session import TermGroup
@@ -155,22 +155,11 @@ def _wrap_leftovers(index, query: str, seen: set) -> list[Leftover]:
     needle = strict_text(query)
     if len(needle) < 2:
         return []
-    runs: list[tuple] = []
-    for page in index:
-        for start, stop in line_runs(page):
-            glyphs = page.glyphs[start:stop]
-            if glyphs:
-                runs.append((page, glyphs, "".join(glyph.strict for glyph in glyphs)))
     found: list[Leftover] = []
-    for (left_page, _left_glyphs, left_text), (right_page, right_glyphs, right_text) in zip(runs, runs[1:]):
-        left_box = left_page.lines[_left_glyphs[0].line_id].bbox
-        right_box = right_page.lines[right_glyphs[0].line_id].bbox
-        same_page = left_page.page_index == right_page.page_index
-        if same_page:
-            if not is_line_wrap(left_box, right_box):
-                continue
-        elif right_page.page_index != left_page.page_index + 1 or not is_page_wrap(left_box, right_box):
-            continue
+    for (left_page, left_start, left_stop), (right_page, right_start, right_stop) in wrap_pairs(index):
+        left_text = left_page.strict[left_start:left_stop]
+        right_text = right_page.strict[right_start:right_stop]
+        right_glyphs = right_page.glyphs[right_start:right_stop]
         split = _suffix_at_start(needle, right_text)
         if split is None:
             continue

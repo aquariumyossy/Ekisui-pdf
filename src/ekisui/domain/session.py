@@ -364,9 +364,12 @@ class Session:
                     if old_page is None or new_page is None:
                         continue
                     mapped = map_page_rect(old_page, new_page, tracked.hit.bbox)
+                    mapped_parts = tuple(
+                        map_page_rect(old_page, new_page, part) for part in tracked.hit.parts
+                    )
                     self._append_hits(
                         group,
-                        [replace(tracked.hit, bbox=mapped, line_ids=())],
+                        [replace(tracked.hit, bbox=mapped, line_ids=(), parts=mapped_parts)],
                         include_fuzzy=False,
                         included=tracked.included,
                     )
@@ -730,9 +733,13 @@ def _occupied(groups: list[TermGroup], group: TermGroup, hit: Hit, overlap: str)
 
 
 def _same_place(left: Hit, right: Hit) -> bool:
-    return left.page_index == right.page_index and left.bbox.intersects(right.bbox) and (
-        abs(left.bbox.x0 - right.bbox.x0) < 1.5 and abs(left.bbox.y0 - right.bbox.y0) < 1.5
-    )
+    if left.page_index != right.page_index:
+        return False
+    for one in left.parts or (left.bbox,):
+        for other in right.parts or (right.bbox,):
+            if one.intersects(other) and abs(one.x0 - other.x0) < 1.5 and abs(one.y0 - other.y0) < 1.5:
+                return True
+    return False
 
 
 def _page_was_rebuilt(old: Page | None, new: Page) -> bool:

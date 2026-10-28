@@ -178,7 +178,6 @@ def _search_string(
             explanation = _explain(needle_strict, window)
             raw.append((index, index + width, MatchKind.FUZZY, score, explanation, ocr_like, 1))
 
-    raw = _complete_short(raw, strict, needle_strict, threshold, table)
     raw.sort(key=lambda item: (-item[3], item[6], item[0], -(item[1] - item[0])))
     chosen: list[tuple[int, int, MatchKind, float, str, bool]] = []
     taken: list[tuple[int, int]] = []
@@ -195,53 +194,6 @@ def _max_distance(length: int, threshold: float) -> int:
     if length <= 3:
         return 1
     return max(int((1.0 - threshold) * max(length, 1) + 1e-9), 1)
-
-
-def _complete_short(
-    raw: list[tuple[int, int, MatchKind, float, str, bool, int]],
-    strict: str,
-    needle: str,
-    threshold: float,
-    table: ConfusableTable,
-) -> list[tuple[int, int, MatchKind, float, str, bool, int]]:
-    """A short fuzzy hit must cover the rest of the term when those chars sit next to it."""
-    extra: list[tuple[int, int, MatchKind, float, str, bool, int]] = []
-    width = len(needle)
-    for start, end, _kind, score, _explanation, _was_ocr, _rank in raw:
-        if end - start >= width or end > len(strict):
-            continue
-        missing = needle[end - start :]
-        if (
-            missing
-            and strict.startswith(needle[: end - start], start)
-            and strict.startswith(missing, end)
-        ):
-            extra.append((start, end + len(missing), MatchKind.EXACT, 1.0, "", False, 0))
-            continue
-        grown = min(len(strict), start + width)
-        if grown <= end:
-            continue
-        window = strict[start:grown]
-        distance = _levenshtein_at_most(window, needle, max(width, len(window)))
-        if distance is None:
-            continue
-        new_score = 1.0 - (distance / max(width, len(window)))
-        if new_score <= score + 1e-9:
-            continue
-        if new_score + 1e-9 < threshold and window != needle:
-            continue
-        extra.append(
-            (
-                start,
-                grown,
-                MatchKind.EXACT if distance == 0 else MatchKind.FUZZY,
-                new_score,
-                _explain(needle, window),
-                _ocr_like(window, needle, table),
-                0,
-            )
-        )
-    return raw + extra
 
 
 def _pick(matches: list[_Match]) -> list[_Match]:
@@ -294,7 +246,7 @@ def _hits_for(pages: tuple[PageIndex, ...] | list[PageIndex], match: _Match) -> 
             Hit(
                 page_index=page.page_index,
                 surface=surface,
-                bbox=bbox_of(glyphs) if len(parts) == 1 else _union(parts),
+                bbox=bbox_of(glyphs) if len(parts) == 1 else parts[0],
                 kind=match.kind,
                 score=match.score,
                 explanation=match.explanation,
@@ -304,13 +256,6 @@ def _hits_for(pages: tuple[PageIndex, ...] | list[PageIndex], match: _Match) -> 
             )
         )
     return hits
-
-
-def _union(parts: tuple[Rect, ...]) -> Rect:
-    rect = parts[0]
-    for part in parts[1:]:
-        rect = rect.union(part)
-    return rect
 
 
 def _ocr_like(window: str, needle: str, table: ConfusableTable) -> bool:

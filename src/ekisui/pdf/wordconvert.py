@@ -37,8 +37,8 @@ _WD_EXPORT_CREATE_NO_BOOKMARKS = 0
 _WD_REVISIONS_VIEW_FINAL = 0
 # msoFeatureInstallNone. Do not download a missing Office feature.
 _MSO_FEATURE_INSTALL_NONE = 0
-# wdMainAndDataSource, wdMainAndSourceAndHeader, wdDataSource.
-_MERGE_WITH_DATA = {2, 3, 5}
+# wdMainAndDataSource, wdMainAndHeader, wdMainAndSourceAndHeader, wdDataSource.
+_MERGE_WITH_DATA = {2, 3, 4, 5}
 
 _MISSING = "Microsoft Word が見つかりません。インストールしてから、もう一度開いてください。"
 _OPEN_FAILED = "Word でファイルを開けませんでした。パスワードが掛かっているか、ファイルが壊れている可能性があります。"
@@ -78,19 +78,26 @@ def _prepare_source(source: Path, work_dir: Path) -> Path:
     """Return a file Word may open. The caller's file is not modified."""
     if looks_like_irm(source):
         raise WordConvertError(irm_message())
-    suffix = source.suffix.lower()
-    if suffix == ".docx" and zipfile_is_docx(source):
+    kind = _file_kind(source)
+    if kind == "zip":
         dest = _unique_docx(work_dir, source.stem)
         neutralize_docx(source, dest)
         return dest
-    if suffix == ".doc" and doc_has_remote_fields(source):
-        raise WordConvertError(external_reference_message())
-    return source
+    if kind == "ole":
+        if doc_has_remote_fields(source):
+            raise WordConvertError(external_reference_message())
+        return source
+    raise WordConvertError(external_reference_message())
 
 
-def zipfile_is_docx(path: Path) -> bool:
+def _file_kind(path: Path) -> str:
     with path.open("rb") as handle:
-        return handle.read(2) == b"PK"
+        head = handle.read(8)
+    if head.startswith(b"PK"):
+        return "zip"
+    if head.startswith(b"\xd0\xcf\x11\xe0"):
+        return "ole"
+    return "other"
 
 
 def _export_word(source: Path, dest: Path) -> None:
@@ -215,6 +222,15 @@ def _silence_network(word) -> dict:
         word.FeatureInstall = _MSO_FEATURE_INSTALL_NONE
     except Exception:
         saved.pop("feature_install", None)
+    options = getattr(word, "Options", None)
+    for option_name in ("UpdateFieldsAtPrint", "UpdateLinksAtPrint"):
+        if options is None:
+            break
+        try:
+            saved[option_name] = getattr(options, option_name)
+            setattr(options, option_name, False)
+        except Exception:
+            saved.pop(option_name, None)
     return saved
 
 
@@ -229,6 +245,14 @@ def _restore_network(word, saved: dict) -> None:
             word.FeatureInstall = saved["feature_install"]
         except Exception:
             pass
+    options = getattr(word, "Options", None)
+    for option_name in ("UpdateFieldsAtPrint", "UpdateLinksAtPrint"):
+        if option_name not in saved or options is None:
+            continue
+        try:
+            setattr(options, option_name, saved[option_name])
+        except Exception:
+            pass
 
 
 def _block_external(word, document) -> None:
@@ -238,20 +262,33 @@ def _block_external(word, document) -> None:
     except Exception:
         pass
     _detach_remote_template(word, document)
-    seen_fields: set[int] = set()
-    seen_shapes: set[int] = set()
+    fields: list = []
+    shapes: list = []
     try:
         main_fields = document.Fields
     except Exception as exc:
         raise WordConvertError(external_reference_message()) from exc
-    _freeze_fields(main_fields, seen_fields, required=True)
-    _break_shapes(getattr(document, "InlineShapes", None), seen_shapes)
-    _break_shapes(getattr(document, "Shapes", None), seen_shapes)
+    fields.extend(_members(main_fields, required=True))
+    shapes.extend(_members(getattr(document, "InlineShapes", None), required=False))
+    shapes.extend(_members(getattr(document, "Shapes", None), required=False))
     for scope in _extra_scopes(document):
-        _freeze_fields(getattr(scope, "Fields", None), seen_fields, required=False)
-        _break_shapes(getattr(scope, "InlineShapes", None), seen_shapes)
-        _break_shapes(getattr(scope, "Shapes", None), seen_shapes)
-        _break_shapes(getattr(scope, "ShapeRange", None), seen_shapes)
+        fields.extend(_members(getattr(scope, "Fields", None), required=False))
+        shapes.extend(_members(getattr(scope, "InlineShapes", None), required=False))
+        shapes.extend(_members(getattr(scope, "Shapes", None), required=False))
+        shapes.extend(_members(getattr(scope, "ShapeRange", None), required=False))
+    # Hold every wrapper until the pass ends. pywin32 reuses freed ids.
+    seen_fields: set[int] = set()
+    seen_shapes: set[int] = set()
+    for field in fields:
+        if id(field) in seen_fields:
+            continue
+        seen_fields.add(id(field))
+        _freeze_field(field)
+    for shape in shapes:
+        if id(shape) in seen_shapes:
+            continue
+        seen_shapes.add(id(shape))
+        _break_shape(shape)
     _refuse_connected_merge(document)
 
 
@@ -309,24 +346,19 @@ def _extra_scopes(document):
                 break
 
 
-def _freeze_fields(collection, seen: set[int], required: bool) -> None:
-    for field in _members(collection, required):
-        if id(field) in seen:
-            continue
-        seen.add(id(field))
-        code = _field_code(field)
-        remote = contains_remote(code)
-        if remote:
-            try:
-                field.Unlink()
-            except Exception as exc:
-                raise WordConvertError(external_reference_message()) from exc
-        else:
-            try:
-                field.Locked = True
-            except Exception:
-                if required:
-                    raise WordConvertError(external_reference_message()) from None
+def _freeze_field(field) -> None:
+    code = _field_code(field)
+    remote = contains_remote(code)
+    if remote:
+        try:
+            field.Unlink()
+        except Exception as exc:
+            raise WordConvertError(external_reference_message()) from exc
+        return
+    try:
+        field.Locked = True
+    except Exception:
+        return
 
 
 def _field_code(field) -> str:
@@ -342,40 +374,36 @@ def _field_code(field) -> str:
         return ""
 
 
-def _break_shapes(collection, seen: set[int]) -> None:
-    for shape in _members(collection, required=False):
-        if id(shape) in seen:
-            continue
-        seen.add(id(shape))
-        try:
-            link = shape.LinkFormat
-        except Exception:
-            continue
-        if link is None:
-            continue
-        try:
-            source = str(getattr(link, "SourceFullName", "") or "")
-        except Exception:
-            kind = getattr(shape, "Type", None)
-            if kind in (2, 4):
-                raise WordConvertError(external_reference_message()) from None
-            continue
-        try:
-            link.AutoUpdate = False
-        except Exception:
-            pass
-        if not is_remote(source) and not contains_remote(source):
-            continue
-        try:
-            link.BreakLink()
-        except Exception as exc:
-            raise WordConvertError(external_reference_message()) from exc
-        try:
-            left = str(getattr(link, "SourceFullName", "") or "")
-        except Exception:
-            left = ""
-        if is_remote(left) or contains_remote(left):
-            raise WordConvertError(external_reference_message())
+def _break_shape(shape) -> None:
+    try:
+        link = shape.LinkFormat
+    except Exception:
+        return
+    if link is None:
+        return
+    try:
+        source = str(getattr(link, "SourceFullName", "") or "")
+    except Exception:
+        kind = getattr(shape, "Type", None)
+        if kind in (2, 4):
+            raise WordConvertError(external_reference_message()) from None
+        return
+    try:
+        link.AutoUpdate = False
+    except Exception:
+        pass
+    if not is_remote(source) and not contains_remote(source):
+        return
+    try:
+        link.BreakLink()
+    except Exception as exc:
+        raise WordConvertError(external_reference_message()) from exc
+    try:
+        left = str(getattr(link, "SourceFullName", "") or "")
+    except Exception:
+        left = ""
+    if is_remote(left) or contains_remote(left):
+        raise WordConvertError(external_reference_message())
 
 
 def _refuse_connected_merge(document) -> None:

@@ -15,6 +15,14 @@ from ekisui.pdf.wordlinks import (
     neutralize_docx,
 )
 
+
+def test_remote_forms() -> None:
+    assert is_remote("file:////fileserver/share/secret.dotx")
+    assert is_remote("file://fileserver/share/secret.dotx")
+    assert is_remote("//fileserver/share/secret.dotx")
+    assert not is_remote("file:///C:/Users/a.png")
+    assert not is_remote("C:\\\\Users\\\\a.png")
+
 FIXTURE = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "external-links.docx"
 FORBIDDEN = {
     "Update",
@@ -425,19 +433,97 @@ def test_doc_with_remote_field_never_starts_word(tmp_path, monkeypatch) -> None:
 
 
 def test_doc_body_url_and_plain_unc_are_not_treated_as_fields(tmp_path, monkeypatch) -> None:
+    ole = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
     citation = tmp_path / "引用.doc"
-    citation.write_bytes("裁判所のサイトは http://courts.go.jp/ です".encode("utf-16-le"))
+    citation.write_bytes(ole + "裁判所のサイトは http://courts.go.jp/ です".encode("utf-16-le"))
     notes = tmp_path / "メモ.doc"
-    notes.write_bytes(b"see \\\\fileserver\\share\\notes.txt")
+    notes.write_bytes(ole + b"see \\\\fileserver\\share\\notes.txt")
     assert doc_has_remote_fields(citation) is False
     assert doc_has_remote_fields(notes) is False
     template = tmp_path / "ひな形.doc"
-    template.write_bytes(b"attached \\\\fileserver\\share\\secret.dotx")
+    template.write_bytes(ole + "attached \\\\srv\\Shared Templates\\firm.dotx".encode("utf-16-le"))
     assert doc_has_remote_fields(template) is True
     monkeypatch.setattr("ekisui.pdf.wordconvert.sys.platform", "linux")
     with pytest.raises(WordConvertError) as caught:
         convert_word_to_pdf(citation, tmp_path / "work")
     assert "Windows" in str(caught.value)
+
+
+def test_split_field_and_file_unc_and_vml_are_removed_before_word(tmp_path) -> None:
+    document = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p><w:r><w:t>残す</w:t></w:r></w:p>
+    <w:p><w:r>
+      <w:fldChar w:fldCharType="begin"/>
+      <w:instrText> INCLUDETEXT "htt</w:instrText>
+      <w:instrText>p://example.invalid/a.docx" </w:instrText>
+      <w:fldChar w:fldCharType="end"/>
+    </w:r></w:p>
+    <w:p><w:r><v:imagedata src="http://example.invalid/photo.png"/></w:r></w:p>
+  </w:body>
+</w:document>
+"""
+    settings = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:attachedTemplate r:id="rId1"/>
+  <w:updateFields w:val="true"/>
+</w:settings>
+"""
+    settings_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" Target="file:////fileserver/share/secret.dotx" TargetMode="External"/>
+</Relationships>
+"""
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>
+"""
+    package_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>
+"""
+    source = tmp_path / "split.doc"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", package_rels)
+        archive.writestr("word/document.xml", document)
+        archive.writestr("word/settings.xml", settings)
+        archive.writestr("word/_rels/settings.xml.rels", settings_rels)
+    source.write_bytes(buffer.getvalue())
+    dest = tmp_path / "clean.docx"
+    neutralize_docx(source, dest)
+    parts = _parts(dest.read_bytes())
+    blob = "\n".join(parts.values())
+    assert "残す" in parts["word/document.xml"]
+    assert "example.invalid" not in blob
+    assert "fileserver" not in blob
+    assert "updateFields" not in parts["word/settings.xml"]
+    assert "attachedTemplate" not in parts["word/settings.xml"]
+    assert 'fldLock="true"' in parts["word/document.xml"]
+
+
+def test_html_and_irm_utf16_are_refused_before_word(tmp_path, monkeypatch) -> None:
+    from ekisui.pdf.wordconvert import _prepare_source
+    from ekisui.pdf.wordlinks import looks_like_irm
+
+    html_doc = tmp_path / "page.doc"
+    html_doc.write_bytes(b"<html><img src=\"http://example.invalid/a.png\"></html>")
+    called = []
+    monkeypatch.setattr("ekisui.pdf.wordconvert._export_word", lambda *args, **kwargs: called.append(args))
+    with pytest.raises(WordConvertError) as caught:
+        convert_word_to_pdf(html_doc, tmp_path / "work")
+    assert "外部" in str(caught.value)
+    assert called == []
+    irm = tmp_path / "rights.docx"
+    irm.write_bytes(b"\xd0\xcf\x11\xe0" + "DRMEncryptedTransform".encode("utf-16-le"))
+    assert looks_like_irm(irm) is True
+    with pytest.raises(WordConvertError) as caught:
+        _prepare_source(irm, tmp_path / "work")
+    assert "権利管理" in str(caught.value)
 
 
 def test_irm_document_is_refused_before_word(tmp_path, monkeypatch) -> None:

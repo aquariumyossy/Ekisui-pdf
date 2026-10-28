@@ -8,17 +8,12 @@ already contains such a target, conversion stops instead of launching Word.
 
 from __future__ import annotations
 
+import html
 import re
 import zipfile
 from pathlib import Path
 from urllib.parse import unquote
-from xml.etree import ElementTree
-
 from ekisui.errors import WordConvertError
-
-W_URI = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-R_URI = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-REL_URI = "http://schemas.openxmlformats.org/package/2006/relationships"
 
 _EXTERNAL = "この Word 文書は、外部の画像や文書、ひな形を参照しています。通信せずには開けないため、開くのをやめました。"
 _IRM = "この Word 文書は権利管理（IRM）で保護されています。確認のために外部へ接続する可能性があるため、開くのをやめました。"
@@ -27,9 +22,6 @@ _IRM_MARKERS = (
     b"Microsoft.Metadata.DRMTransform",
     b"DRMContent",
 )
-_FIELD_WITH_TARGET = ("INCLUDEPICTURE", "INCLUDETEXT", "DDEAUTO", "DATABASE")
-_TEMPLATE_SUFFIX = re.compile(r"\.(?:dot|dotx|dotm)\b", re.IGNORECASE)
-
 
 def external_reference_message() -> str:
     return _EXTERNAL
@@ -49,17 +41,16 @@ def is_remote(target: str) -> bool:
         return True
     if text.startswith("\\\\") or text.startswith("//"):
         return True
-    if lowered.startswith("file://"):
-        rest = text[7:]
-        if rest.startswith("/"):
-            rest = rest.lstrip("/")
-            if re.match(r"^[A-Za-z]:[\\/]", rest):
-                return False
-            if rest.lower().startswith(("localhost", "127.0.0.1")):
-                return False
+    if lowered.startswith("file:"):
+        after = text[5:]
+        slashes = len(after) - len(after.lstrip("/"))
+        rest = after.lstrip("/")
+        if re.match(r"^[A-Za-z]:[\\/]", rest) or rest.lower().startswith(("localhost", "127.0.0.1")):
             return False
-        host = rest.split("/", 1)[0].lower()
-        return bool(host) and host not in {"localhost", "127.0.0.1"}
+        # file:////server/share and file://server/share are UNC. file:///C:/ is local.
+        if slashes >= 4 or slashes == 2:
+            return bool(rest)
+        return False
     return False
 
 
@@ -67,20 +58,36 @@ def contains_remote(text: str) -> bool:
     """True when a field instruction or path mentions a remote target."""
     if not text:
         return False
-    lowered = unquote(text).lower()
+    decoded = unquote(text)
+    if is_remote(decoded.strip().strip('"').strip("'")):
+        return True
+    lowered = decoded.lower()
     if any(token in lowered for token in ("http://", "https://", "ftp://", "ftps://", "sftp://")):
         return True
-    if "\\\\" in text or "\\\\" in unquote(text):
+    if re.search(r"(?<![A-Za-z0-9:])\\\\", decoded):
         return True
-    if re.search(r"file://[^/]", lowered):
+    if re.search(r"(?<!:)//[A-Za-z0-9_.$-]+/", decoded):
+        return True
+    if "file:////" in lowered or re.search(r"file://[^/]", lowered):
         return True
     return False
 
 
 def looks_like_irm(path: Path) -> bool:
+    needles = list(_IRM_MARKERS)
+    for marker in _IRM_MARKERS:
+        needles.append(marker.decode("ascii").encode("utf-16-le"))
+    overlap = max(len(item) for item in needles) - 1
     with path.open("rb") as handle:
-        sample = handle.read(4_000_000)
-    return any(marker in sample for marker in _IRM_MARKERS)
+        previous = b""
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                return False
+            data = previous + chunk
+            if any(needle in data for needle in needles):
+                return True
+            previous = data[-overlap:] if overlap else b""
 
 
 def doc_has_remote_fields(path: Path) -> bool:
@@ -108,7 +115,7 @@ def neutralize_docx(source: Path, dest: Path) -> None:
     rewritten: dict[str, bytes] = {}
     dropped_by_part: dict[str, set[str]] = {}
     for name, data in files.items():
-        if name.endswith(".rels"):
+        if name.lower().endswith(".rels"):
             try:
                 xml, ids = _rewrite_relationships(data)
             except WordConvertError:
@@ -122,7 +129,7 @@ def neutralize_docx(source: Path, dest: Path) -> None:
         else:
             rewritten[name] = data
     for name, data in list(rewritten.items()):
-        if _is_word_xml(name, data):
+        if _is_markup(name) and not name.lower().endswith(".rels"):
             try:
                 rewritten[name] = _rewrite_document_part(data, dropped_by_part.get(name, set()))
             except WordConvertError:
@@ -130,7 +137,10 @@ def neutralize_docx(source: Path, dest: Path) -> None:
             except Exception as exc:
                 raise WordConvertError(_EXTERNAL) from exc
     for name, data in rewritten.items():
-        if name.endswith((".xml", ".rels")) and _xml_still_fetches(data):
+        lower = name.lower()
+        if lower.endswith((".xml", ".rels", ".htm", ".html")) and _markup_fetches(
+            data.decode("utf-8", errors="replace"), lower.endswith(".rels")
+        ):
             raise WordConvertError(_EXTERNAL)
     dest.parent.mkdir(parents=True, exist_ok=True)
     partial = dest.with_name(dest.name + ".partial")
@@ -145,8 +155,15 @@ def neutralize_docx(source: Path, dest: Path) -> None:
 
 
 def _text_has_remote_word_target(text: str) -> bool:
+    for match in re.finditer(
+        r"\x13\s*(INCLUDEPICTURE|INCLUDETEXT|DDEAUTO|DATABASE|IMPORT|DDE|LINK)\b.{0,600}",
+        text,
+        re.IGNORECASE,
+    ):
+        if contains_remote(match.group(0)):
+            return True
     upper = text.upper()
-    for name in _FIELD_WITH_TARGET:
+    for name in ("INCLUDEPICTURE", "INCLUDETEXT", "DDEAUTO"):
         start = 0
         while True:
             index = upper.find(name, start)
@@ -155,225 +172,271 @@ def _text_has_remote_word_target(text: str) -> bool:
             if contains_remote(text[index : index + 800]):
                 return True
             start = index + len(name)
-    for match in re.finditer(r"(?:^|[\s\x13])LINK\s.{0,400}", text, re.IGNORECASE):
-        if contains_remote(match.group(0)):
-            return True
-    for match in re.finditer(r"(?:^|[\s\x13])DDE\s.{0,400}", text, re.IGNORECASE):
-        if contains_remote(match.group(0)):
-            return True
-    for match in re.finditer(r"\\\\[^\s\"'<>]{1,240}", text):
-        if _TEMPLATE_SUFFIX.search(match.group(0)):
-            return True
-    for match in re.finditer(r"https?://[^\s\"'<>]{1,240}", text, re.IGNORECASE):
-        if _TEMPLATE_SUFFIX.search(match.group(0)):
-            return True
+    if re.search(
+        r"(?:\\\\|//|file:////)[^\x00\r\n\"<>|]{0,300}?\.(?:dot|dotx|dotm)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return True
+    if re.search(r"https?://[^\s\"'<>]{0,240}?\.(?:dot|dotx|dotm)\b", text, re.IGNORECASE):
+        return True
     return False
 
 
 def _part_fetches(name: str, data: bytes) -> bool:
-    if not (name.endswith(".rels") or _is_word_xml(name, data)):
+    if not _is_markup(name):
         return False
-    try:
-        root = _parse_xml(data)
-    except ElementTree.ParseError:
-        return True
-    return bool(_remaining_fetch_targets(root))
+    return _markup_fetches(data.decode("utf-8", errors="replace"), name.lower().endswith(".rels"))
 
 
 def _part_for_relationships(name: str) -> str | None:
     """`word/_rels/settings.xml.rels` belongs to `word/settings.xml` only."""
+    lower = name.lower()
     marker = "/_rels/"
-    if marker not in name or not name.endswith(".rels"):
+    index = lower.rfind(marker)
+    if index < 0 or not lower.endswith(".rels"):
         return None
-    folder, base = name.split(marker, 1)
-    part = base[: -len(".rels")]
+    folder = name[:index]
+    base = name[index + len(marker) :]
+    if not base.lower().endswith(".rels"):
+        return None
+    part = base[:-5]
     return f"{folder}/{part}" if folder else part
 
 
-def _is_word_xml(name: str, data: bytes) -> bool:
-    if not name.endswith(".xml") or name.endswith(".rels"):
-        return False
-    return name.startswith("word/")
+def _is_markup(name: str) -> bool:
+    lower = name.lower()
+    return lower.endswith((".xml", ".rels", ".htm", ".html"))
 
 
 def _rewrite_relationships(data: bytes) -> tuple[bytes, set[str]]:
-    root = _parse_xml(data)
-    dropped: set[str] = set()
-    removed = []
-    for element in list(root):
-        if _local(element.tag) != "Relationship":
-            continue
-        target = element.get("Target") or ""
-        kind = (element.get("Type") or "").lower()
-        if kind.endswith("/hyperlink"):
-            continue
-        if is_remote(target) or contains_remote(target):
-            ident = element.get("Id") or ""
-            if ident:
-                dropped.add(ident)
-            removed.append(element)
-    for element in removed:
-        root.remove(element)
-    return _xml_bytes(root), dropped
+    text = data.decode("utf-8")
+    edited, dropped = _edit_relationships(text)
+    return edited.encode("utf-8"), dropped
 
 
 def _rewrite_document_part(data: bytes, dropped: set[str]) -> bytes:
-    root = _parse_xml(data)
-    _strip_dropped_references(root, dropped)
-    _scrub_fields(root)
-    _scrub_loose_instructions(root)
-    if _remaining_fetch_targets(root):
+    text = data.decode("utf-8")
+    edited = _edit_markup(text, dropped)
+    if _markup_fetches(edited, rels=False):
         raise WordConvertError(_EXTERNAL)
-    return _xml_bytes(root)
+    return data if edited == text else edited.encode("utf-8")
 
 
-def _strip_dropped_references(root: ElementTree.Element, dropped: set[str]) -> None:
-    if not dropped:
-        return
-    parents = _parent_map(root)
-    doomed: list[ElementTree.Element] = []
-    for element in list(root.iter()):
-        if _local(element.tag) == "mailMerge" and _subtree_uses(element, dropped):
-            doomed.append(element)
-            continue
-        refs = _relationship_ids(element)
-        if not any(value in dropped for _key, value in refs):
-            continue
-        kept = [(key, value) for key, value in refs if value not in dropped]
-        if kept and _local(element.tag) == "blip":
-            for key, value in refs:
-                if value in dropped:
-                    del element.attrib[key]
-            continue
-        doomed.append(element)
-    for element in doomed:
-        parent = parents.get(element)
-        if parent is not None and element in list(parent):
-            parent.remove(element)
+_FETCH_FIELD = re.compile(r"\b(INCLUDEPICTURE|INCLUDETEXT|DDEAUTO|DATABASE|IMPORT|DDE|LINK)\b", re.IGNORECASE)
+_REL_TAG = re.compile(r"<(?:[\w.]+:)?Relationship\b[^>]*/>", re.IGNORECASE)
+_INSTR_TEXT = re.compile(r"(<(?:[\w.]+:)?instrText\b[^>]*>)(.*?)(</(?:[\w.]+:)?instrText\s*>)", re.IGNORECASE | re.DOTALL)
 
 
-def _scrub_fields(root: ElementTree.Element) -> None:
-    stack: list[dict] = []
-    for element in root.iter():
-        name = _local(element.tag)
-        if name == "fldChar":
-            kind = (_attr(element, "fldCharType") or "").lower()
-            if kind == "begin":
-                _set_attr(element, "fldLock", "true", W_URI)
-                stack.append({"nodes": [], "scrubbed": False})
-            elif kind == "separate" and stack:
-                _scrub_instruction(stack[-1])
-            elif kind == "end" and stack:
-                field = stack.pop()
-                _scrub_instruction(field)
-        elif name == "instrText" and stack:
-            stack[-1]["nodes"].append(element)
-        elif name == "fldSimple" and contains_remote(_attr(element, "instr") or ""):
-            _set_attr(element, "instr", ' QUOTE "" ', W_URI)
-
-
-def _scrub_instruction(field: dict) -> None:
-    if field["scrubbed"]:
-        return
-    text = "".join(node.text or "" for node in field["nodes"])
-    if not contains_remote(text):
-        return
-    if field["nodes"]:
-        field["nodes"][0].text = ' QUOTE "" '
-        for node in field["nodes"][1:]:
-            node.text = ""
-    field["scrubbed"] = True
-
-
-def _scrub_loose_instructions(root: ElementTree.Element) -> None:
-    for element in root.iter():
-        name = _local(element.tag)
-        if name == "instrText" and contains_remote(element.text or ""):
-            element.text = ' QUOTE "" '
-        elif name == "fldSimple" and contains_remote(_attr(element, "instr") or ""):
-            _set_attr(element, "instr", ' QUOTE "" ', W_URI)
-
-
-def _xml_still_fetches(data: bytes) -> bool:
-    try:
-        root = _parse_xml(data)
-    except ElementTree.ParseError:
+def _markup_fetches(xml: str, rels: bool) -> bool:
+    if rels:
+        for match in _REL_TAG.finditer(xml):
+            if _relationship_fetches(match.group(0)):
+                return True
+        return False
+    if re.search(r"<(?:[\w.]+:)?mailMerge\b", xml, re.IGNORECASE):
         return True
-    return bool(_remaining_fetch_targets(root))
-
-
-def _remaining_fetch_targets(root: ElementTree.Element) -> list[str]:
-    found: list[str] = []
-    for element in root.iter():
-        name = _local(element.tag)
-        if name == "instrText" and contains_remote(element.text or ""):
-            found.append(element.text or "")
-        elif name == "fldSimple" and contains_remote(_attr(element, "instr") or ""):
-            found.append(_attr(element, "instr") or "")
-        elif name == "Relationship":
-            target = element.get("Target") or ""
-            kind = (element.get("Type") or "").lower()
-            if not kind.endswith("/hyperlink") and (is_remote(target) or contains_remote(target)):
-                found.append(target)
-    return found
-
-
-def _parse_xml(data: bytes) -> ElementTree.Element:
-    if data.startswith(b"\xef\xbb\xbf"):
-        data = data[3:]
-    text = data.decode("utf-8", errors="replace")
-    for prefix, uri in re.findall(r'xmlns:([A-Za-z0-9]+)="([^"]+)"', text):
-        ElementTree.register_namespace(prefix, uri)
-    if 'xmlns="' in text:
-        match = re.search(r'\sxmlns="([^"]+)"', text)
-        if match:
-            ElementTree.register_namespace("", match.group(1))
-    for prefix, uri in (("w", W_URI), ("r", R_URI), ("pr", REL_URI)):
-        ElementTree.register_namespace(prefix, uri)
-    return ElementTree.fromstring(data)
-
-
-def _xml_bytes(root: ElementTree.Element) -> bytes:
-    return ElementTree.tostring(root, encoding="UTF-8", xml_declaration=True)
-
-
-def _relationship_ids(element: ElementTree.Element) -> list[tuple[str, str]]:
-    found = []
-    for key, value in element.attrib.items():
-        if key.startswith("{") and key[1:].split("}", 1)[0] == R_URI:
-            found.append((key, value))
-    return found
-
-
-def _subtree_uses(element: ElementTree.Element, dropped: set[str]) -> bool:
-    for node in element.iter():
-        if any(value in dropped for _key, value in _relationship_ids(node)):
+    if re.search(r"<(?:[\w.]+:)?updateFields\b[^>]*\bval\s*=\s*[\"'](?:true|1)[\"']", xml, re.IGNORECASE):
+        return True
+    for instruction in _field_instructions(xml):
+        if _FETCH_FIELD.search(instruction) or contains_remote(instruction):
+            return True
+    for url in _markup_urls(xml):
+        if is_remote(url) or contains_remote(url):
             return True
     return False
 
 
-def _parent_map(root: ElementTree.Element) -> dict[ElementTree.Element, ElementTree.Element | None]:
-    parents: dict[ElementTree.Element, ElementTree.Element | None] = {root: None}
-    for element in root.iter():
-        for child in list(element):
-            parents[child] = element
-    return parents
+def _relationship_fetches(tag: str) -> bool:
+    kind = (_attr_value(tag, "Type") or "").lower()
+    if kind.endswith("/hyperlink"):
+        return False
+    target = html.unescape(_attr_value(tag, "Target") or "")
+    mode = (_attr_value(tag, "TargetMode") or "").lower()
+    return mode == "external" or is_remote(target) or contains_remote(target)
 
 
-def _local(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1]
+def _edit_relationships(xml: str) -> tuple[str, set[str]]:
+    dropped: set[str] = set()
+
+    def repl(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        if not _relationship_fetches(tag):
+            return tag
+        ident = _attr_value(tag, "Id")
+        if ident:
+            dropped.add(html.unescape(ident))
+        return ""
+
+    return _REL_TAG.sub(repl, xml), dropped
 
 
-def _attr(element: ElementTree.Element, local: str) -> str | None:
-    for key, value in element.attrib.items():
-        if key == local or key.endswith("}" + local):
-            return value
-    return None
+def _edit_markup(xml: str, dropped: set[str]) -> str:
+    xml = _remove_balanced(xml, "mailMerge")
+    xml = re.sub(r"<(?:[\w.]+:)?updateFields\b[^>]*/>", "", xml, flags=re.IGNORECASE)
+    xml = re.sub(r"<(?:[\w.]+:)?attachedTemplate\b[^>]*>\s*</(?:[\w.]+:)?attachedTemplate>", "", xml, flags=re.IGNORECASE)
+    xml = re.sub(r"<(?:[\w.]+:)?attachedTemplate\b[^>]*/>", "", xml, flags=re.IGNORECASE)
+    xml = _strip_relationship_ids(xml, dropped)
+    xml = _scrub_remote_attrs(xml)
+    xml = _scrub_field_instructions(xml)
+    return _lock_field_begins(xml)
 
 
-def _set_attr(element: ElementTree.Element, local: str, value: str, uri: str) -> None:
-    for key in list(element.attrib):
-        if key == local or key.endswith("}" + local):
-            element.set(key, value)
-            return
-    element.set(f"{{{uri}}}{local}", value)
+def _field_instructions(xml: str) -> list[str]:
+    found = []
+    for match in re.finditer(r"<(?:[\w.]+:)?fldSimple\b([^>]*)/?>", xml, re.IGNORECASE):
+        instr = _attr_value(match.group(1), "instr")
+        if instr is not None:
+            found.append(html.unescape(instr))
+    for pieces in _complex_instructions(xml):
+        found.append("".join(pieces))
+    return found
+
+
+def _complex_instructions(xml: str) -> list[list[str]]:
+    fields: list[list[str]] = []
+    stack: list[list[str]] = []
+    for match in re.finditer(r"<(?P<slash>/)?(?P<pre>[\w.]+:)?(?P<name>fldChar|instrText)\b(?P<attrs>[^>]*?)(?P<self>/)?>", xml, re.IGNORECASE):
+        name = match.group("name").lower()
+        if name == "fldchar" and not match.group("slash"):
+            kind = (_attr_value(match.group("attrs"), "fldCharType") or "").lower()
+            if kind == "begin":
+                stack.append([])
+            elif kind in {"separate", "end"} and stack:
+                if kind == "end":
+                    fields.append(stack.pop())
+                else:
+                    fields.append(list(stack[-1]))
+                    stack[-1] = []
+        elif name == "instrtext" and stack and not match.group("slash") and not match.group("self"):
+            close = re.search(r"</(?:[\w.]+:)?instrText\s*>", xml[match.end() :], re.IGNORECASE)
+            if close:
+                stack[-1].append(html.unescape(xml[match.end() : match.end() + close.start()]))
+    return fields
+
+
+def _scrub_field_instructions(xml: str) -> str:
+    def repl_simple(match: re.Match[str]) -> str:
+        attrs = match.group(2)
+        instr = _attr_value(attrs, "instr")
+        if instr is None:
+            return match.group(0)
+        plain = html.unescape(instr)
+        if not (_FETCH_FIELD.search(plain) or contains_remote(plain)):
+            return match.group(0)
+        return match.group(1) + _replace_attr(attrs, "instr", " QUOTE &quot;&quot; ") + match.group(3)
+
+    xml = re.sub(r"(<(?:[\w.]+:)?fldSimple\b)([^>]*?)(/?>)", repl_simple, xml, flags=re.IGNORECASE)
+    groups = _complex_instructions(xml)
+    if not groups:
+        return xml
+    matches = list(_INSTR_TEXT.finditer(xml))
+    cursor = 0
+    replacements: list[tuple[int, int, str]] = []
+    for pieces in groups:
+        count = len(pieces)
+        chunk = matches[cursor : cursor + count]
+        cursor += count
+        if len(chunk) != count:
+            break
+        if not (_FETCH_FIELD.search("".join(pieces)) or contains_remote("".join(pieces))):
+            continue
+        for index, match in enumerate(chunk):
+            text = " QUOTE \"\" " if index == 0 else ""
+            replacements.append((match.start(2), match.end(2), text))
+    for start, end, text in reversed(replacements):
+        xml = xml[:start] + text + xml[end:]
+    return xml
+
+
+def _lock_field_begins(xml: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        if not re.search(r"fldCharType\s*=\s*[\"']begin[\"']", tag, re.IGNORECASE):
+            return tag
+        if re.search(r"fldLock\s*=", tag, re.IGNORECASE):
+            return tag
+        prefix = ""
+        named = re.match(r"<([\w.]+:)?fldChar\b", tag, re.IGNORECASE)
+        if named and named.group(1):
+            prefix = named.group(1)
+        return tag[:-1] + f' {prefix}fldLock="true">'
+
+    return re.sub(r"<(?:[\w.]+:)?fldChar\b[^>]*>", repl, xml, flags=re.IGNORECASE)
+
+
+def _scrub_remote_attrs(xml: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        url = html.unescape(match.group(2))
+        if is_remote(url) or contains_remote(url):
+            return match.group(1) + match.group(3)
+        return match.group(0)
+
+    return re.sub(r"(\s(?:[\w.]+:)?(?:src|href)\s*=\s*\")([^\"]*)(\")", repl, xml, flags=re.IGNORECASE)
+
+
+def _strip_relationship_ids(xml: str, dropped: set[str]) -> str:
+    for ident in dropped:
+        xml = re.sub(
+            rf"""\s(?:[\w.]+:)?(?:id|embed|link)\s*=\s*(["']){re.escape(ident)}\1""",
+            "",
+            xml,
+            flags=re.IGNORECASE,
+        )
+    return xml
+
+
+def _remove_balanced(xml: str, local: str) -> str:
+    pattern = re.compile(rf"<(?P<pre>[\w.]+:)?{local}\b(?P<attrs>[^>]*?)(?P<self>/)?>", re.IGNORECASE)
+    while True:
+        match = pattern.search(xml)
+        if not match:
+            return xml
+        if match.group("self"):
+            xml = xml[: match.start()] + xml[match.end() :]
+            continue
+        prefix = match.group("pre") or ""
+        close_re = re.compile(rf"</{re.escape(prefix)}{local}\s*>", re.IGNORECASE)
+        depth = 1
+        pos = match.end()
+        end_at: int | None = None
+        while depth:
+            nxt = pattern.search(xml, pos)
+            closed = close_re.search(xml, pos)
+            if closed is None:
+                raise WordConvertError(_EXTERNAL)
+            if nxt and not nxt.group("self") and nxt.start() < closed.start():
+                depth += 1
+                pos = nxt.end()
+                continue
+            depth -= 1
+            pos = closed.end()
+            end_at = closed.end()
+        xml = xml[: match.start()] + xml[end_at:]
+
+
+def _markup_urls(xml: str) -> list[str]:
+    return [html.unescape(match.group(1)) for match in re.finditer(
+        r"\s(?:[\w.]+:)?(?:src|href)\s*=\s*\"([^\"]*)\"",
+        xml,
+        re.IGNORECASE,
+    )]
+
+
+def _attr_value(blob: str, name: str) -> str | None:
+    match = re.search(rf"(?:[\w.]+:)?{name}\s*=\s*([\"'])(.*?)\1", blob, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    return match.group(2)
+
+
+def _replace_attr(blob: str, name: str, value: str) -> str:
+    return re.sub(
+        rf"((?:[\w.]+:)?{name}\s*=\s*)([\"']).*?\2",
+        lambda match: match.group(1) + match.group(2) + value + match.group(2),
+        blob,
+        count=1,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+

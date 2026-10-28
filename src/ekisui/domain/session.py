@@ -733,13 +733,23 @@ def _occupied(groups: list[TermGroup], group: TermGroup, hit: Hit, overlap: str)
 
 
 def _same_place(left: Hit, right: Hit) -> bool:
+    """True when every part of the new hit already sits inside the existing one."""
     if left.page_index != right.page_index:
         return False
-    for one in left.parts or (left.bbox,):
-        for other in right.parts or (right.bbox,):
-            if one.intersects(other) and abs(one.x0 - other.x0) < 1.5 and abs(one.y0 - other.y0) < 1.5:
-                return True
-    return False
+    existing = left.parts or (left.bbox,)
+    incoming = right.parts or (right.bbox,)
+    if not incoming:
+        return False
+    for rect in incoming:
+        if not any(
+            abs(rect.x0 - old.x0) < 1.5
+            and abs(rect.y0 - old.y0) < 1.5
+            and rect.x1 <= old.x1 + 1.5
+            and rect.y1 <= old.y1 + 2.0
+            for old in existing
+        ):
+            return False
+    return True
 
 
 def _page_was_rebuilt(old: Page | None, new: Page) -> bool:

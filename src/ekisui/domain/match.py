@@ -85,36 +85,119 @@ def _search_wraps(
     settings: Settings,
     table: ConfusableTable,
 ) -> list[_Match]:
-    """A term split by a line break or a page break is still one match."""
+    """A term split by a line break, a third line, or a page break is still one match."""
     if len(needle_strict) < 2:
         return []
-    slack = _max_distance(len(needle_strict), settings.fuzzy_threshold)
-    take = len(needle_strict) + slack
+    take = len(needle_strict) + _max_distance(len(needle_strict), settings.fuzzy_threshold)
+    by_index = {page.page_index: page for page in pages}
     found: list[_Match] = []
-    for (left_page, left_start, left_stop), (right_page, right_start, right_stop) in wrap_pairs(pages):
-        cut = max(left_start, left_stop - take)
-        right_end = min(right_stop, right_start + take)
-        left_count = left_stop - cut
-        if left_count <= 0 or right_end <= right_start:
+    for chain in _wrap_chains(wrap_pairs(pages)):
+        for window in _windows_for(chain, by_index, take):
+            found.extend(_matches_in_window(window, needle_strict, needle_loose, settings, table))
+    return found
+
+
+def _windows_for(
+    chain: list[tuple[PageIndex, int, int]],
+    by_index: dict[int, PageIndex],
+    take: int,
+) -> list[list[tuple[PageIndex, int, int]]]:
+    windows = [_chain_window([left, right], by_index, take) for left, right in zip(chain, chain[1:])]
+    short_middle = all(stop - start <= take for _, start, stop in chain[1:-1])
+    if len(chain) > 2 and short_middle:
+        windows.append(_chain_window(chain, by_index, take))
+    return windows
+
+
+def _matches_in_window(
+    window: list[tuple[PageIndex, int, int]],
+    needle_strict: str,
+    needle_loose: str,
+    settings: Settings,
+    table: ConfusableTable,
+) -> list[_Match]:
+    if len(window) < 2:
+        return []
+    cursor: list[tuple[int, int]] = []
+    strict_parts: list[str] = []
+    loose_parts: list[str] = []
+    boundaries: list[int] = []
+    for page, start, stop in window:
+        if stop <= start:
             continue
-        strict = left_page.strict[cut:left_stop] + right_page.strict[right_start:right_end]
-        loose = left_page.loose[cut:left_stop] + right_page.loose[right_start:right_end]
-        for local_start, local_end, kind, score, explanation, ocr_like in _search_string(
-            strict, loose, needle_strict, needle_loose, settings, table
-        ):
-            if local_start >= left_count or local_end <= left_count:
-                continue
-            left_from = cut + local_start
-            right_to = right_start + (local_end - left_count)
-            if left_page.page_index == right_page.page_index and left_stop == right_start:
-                pieces = ((left_page.page_index, left_from, right_to),)
-            else:
-                pieces = (
-                    (left_page.page_index, left_from, left_stop),
-                    (right_page.page_index, right_start, right_to),
-                )
+        boundaries.append(len(cursor))
+        strict_parts.append(page.strict[start:stop])
+        loose_parts.append(page.loose[start:stop])
+        cursor.extend((page.page_index, index) for index in range(start, stop))
+    if len(boundaries) < 2 or not cursor:
+        return []
+    first_end = boundaries[1]
+    found: list[_Match] = []
+    for local_start, local_end, kind, score, explanation, ocr_like in _search_string(
+        "".join(strict_parts), "".join(loose_parts), needle_strict, needle_loose, settings, table
+    ):
+        if local_end <= first_end or local_start >= len(cursor):
+            continue
+        pieces = _pieces_from(cursor[local_start:local_end])
+        if pieces:
             found.append(_Match(pieces, kind, score, explanation, ocr_like))
     return found
+
+
+def _wrap_chains(
+    pairs: list[tuple[tuple[PageIndex, int, int], tuple[PageIndex, int, int]]],
+) -> list[list[tuple[PageIndex, int, int]]]:
+    def key(node: tuple[PageIndex, int, int]) -> tuple[int, int, int]:
+        return (node[0].page_index, node[1], node[2])
+
+    nxt: dict[tuple[int, int, int], tuple[int, int, int]] = {}
+    node: dict[tuple[int, int, int], tuple[PageIndex, int, int]] = {}
+    for left, right in pairs:
+        nxt[key(left)] = key(right)
+        node[key(left)] = left
+        node[key(right)] = right
+    heads = [item for item in nxt if item not in nxt.values()]
+    chains: list[list[tuple[PageIndex, int, int]]] = []
+    for head in heads:
+        chain = [node[head]]
+        seen = {head}
+        cur = head
+        while cur in nxt and nxt[cur] not in seen:
+            cur = nxt[cur]
+            seen.add(cur)
+            chain.append(node[cur])
+        if len(chain) >= 2:
+            chains.append(chain)
+    return chains
+
+
+def _chain_window(
+    chain: list[tuple[PageIndex, int, int]],
+    by_index: dict[int, PageIndex],
+    take: int,
+) -> list[tuple[PageIndex, int, int]]:
+    """Tail of the first line, short middle lines, and the head of the last line."""
+    window: list[tuple[PageIndex, int, int]] = []
+    page, start, stop = chain[0]
+    window.append((by_index[page.page_index], max(start, stop - take), stop))
+    for page, start, stop in chain[1:-1]:
+        if stop - start > take:
+            break
+        window.append((by_index[page.page_index], start, stop))
+    else:
+        page, start, stop = chain[-1]
+        window.append((by_index[page.page_index], start, min(stop, start + take)))
+    return window
+
+
+def _pieces_from(chosen: list[tuple[int, int]]) -> tuple[tuple[int, int, int], ...]:
+    pieces: list[list[int]] = []
+    for page_index, index in chosen:
+        if pieces and pieces[-1][0] == page_index and pieces[-1][2] == index:
+            pieces[-1][2] = index + 1
+        else:
+            pieces.append([page_index, index, index + 1])
+    return tuple((item[0], item[1], item[2]) for item in pieces)
 
 
 def _search_string(
@@ -225,7 +308,7 @@ def _pick(matches: list[_Match]) -> list[_Match]:
 
 def _hits_for(pages: tuple[PageIndex, ...] | list[PageIndex], match: _Match) -> list[Hit]:
     by_index = {page.page_index: page for page in pages}
-    groups: list[tuple[PageIndex, list[Glyph]]] = []
+    grouped: dict[int, list[Glyph]] = {}
     lines = {}
     all_glyphs: list[Glyph] = []
     for page_index, start, end in match.pieces:
@@ -233,9 +316,10 @@ def _hits_for(pages: tuple[PageIndex, ...] | list[PageIndex], match: _Match) -> 
         glyphs = list(page.glyphs[start:end])
         if not glyphs:
             continue
-        groups.append((page, glyphs))
+        grouped.setdefault(page_index, []).extend(glyphs)
         all_glyphs.extend(glyphs)
         lines.update(page.lines)
+    groups = [(by_index[page_index], glyphs) for page_index, glyphs in grouped.items()]
     if not all_glyphs:
         return []
     surface = surface_of(all_glyphs, lines)

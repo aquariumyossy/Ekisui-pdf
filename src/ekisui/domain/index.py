@@ -16,10 +16,8 @@ def build_page_index(page: Page, table: ConfusableTable) -> PageIndex:
     breaks = [0]
     previous: TextLine | None = None
     for line in lines:
-        if previous is not None:
-            gap = line.bbox.y0 - previous.bbox.y1
-            if gap >= max(6.0, previous.bbox.height * 0.65):
-                breaks.append(len(glyphs))
+        if previous is not None and _starts_new_block(previous, line):
+            breaks.append(len(glyphs))
         glyphs.extend(_glyphs_for_line(line, table))
         previous = line
     breaks.append(len(glyphs))
@@ -147,6 +145,32 @@ def line_runs(page: PageIndex) -> list[tuple[int, int]]:
     return runs
 
 
+def _starts_new_block(previous: TextLine, line: TextLine) -> bool:
+    """A new paragraph, or the other column of the same row.
+
+    A scanned text layer is one glyph per cell. Those cells are far apart, but
+    each piece is a single character of the same line. A column break needs a
+    run of text on both sides.
+    """
+    gap = line.bbox.y0 - previous.bbox.y1
+    vertical = gap >= max(6.0, previous.bbox.height * 0.65)
+    if len(previous.text.strip()) < 2 or len(line.text.strip()) < 2:
+        return vertical
+    if abs(line.bbox.x0 - previous.bbox.x0) > max(48.0, previous.bbox.height * 2.5):
+        return True
+    overlap = min(previous.bbox.y1, line.bbox.y1) - max(previous.bbox.y0, line.bbox.y0)
+    if overlap >= 0.4 * max(1.0, min(previous.bbox.height, line.bbox.height)):
+        if line.bbox.x0 >= previous.bbox.x1 - 1:
+            gutter = line.bbox.x0 - previous.bbox.x1
+        elif previous.bbox.x0 >= line.bbox.x1 - 1:
+            gutter = previous.bbox.x0 - line.bbox.x1
+        else:
+            gutter = 0.0
+        if gutter > max(36.0, previous.bbox.height * 2):
+            return True
+    return vertical
+
+
 def is_line_wrap(left: Rect, right: Rect) -> bool:
     """True when ``right`` is the next wrapped line, not a new paragraph or column."""
     gap = right.y0 - left.y1
@@ -174,13 +198,86 @@ def _body_runs(page: PageIndex) -> list[tuple[int, int]]:
 
 
 def _furniture(page: PageIndex, glyphs: tuple[Glyph, ...] | list[Glyph]) -> bool:
+    """A page number or a short running header. A wrapped tail in the body is kept."""
     text = "".join(glyph.strict for glyph in glyphs)
-    box = page.lines[glyphs[0].line_id].bbox
-    if text and len(text) <= 8 and all(ch.isdigit() or ch in "-－–—‐−" for ch in text):
-        return True
-    if page.height <= 0 or len(text) > 24:
+    if not text:
         return False
-    return box.y0 < 56 or box.y0 > page.height - 72
+    box = page.lines[glyphs[0].line_id].bbox
+    in_margin = page.height > 0 and (box.y0 < 56 or box.y0 > page.height - 72)
+    digits = len(text) <= 8 and all(ch.isdigit() or ch in "-－–—‐−" for ch in text)
+    if digits:
+        return in_margin
+    if not in_margin or len(text) > 24 or text[:1] in "ーｰ々ゝゞ":
+        return False
+    return True
+
+
+def _same_column(left: Rect, right: Rect) -> bool:
+    return abs(right.x0 - left.x0) <= max(48.0, left.height * 2.5)
+
+
+def _column_wraps(page: PageIndex) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """Pair each full line with the next line in the same column, then a short tail."""
+    infos: list[tuple[int, int, Rect, int]] = []
+    for start, stop in _body_runs(page):
+        glyphs = page.glyphs[start:stop]
+        if not glyphs:
+            continue
+        box = page.lines[glyphs[0].line_id].bbox
+        infos.append((start, stop, box, stop - start))
+    if len(infos) < 2:
+        return []
+    edges: list[list[float]] = []
+    for _, _, box, _ in infos:
+        for edge in edges:
+            if abs(edge[0] - box.x0) <= max(48.0, box.height * 2.5):
+                edge[1] = max(edge[1], box.x1)
+                break
+        else:
+            edges.append([box.x0, box.x1])
+
+    def reaches(box: Rect) -> bool:
+        right = box.x1
+        for origin, far in edges:
+            if abs(origin - box.x0) <= max(48.0, box.height * 2.5):
+                right = max(right, far)
+        return box.x1 >= right - max(48.0, box.height * 3.0)
+
+    def next_below(index: int) -> int | None:
+        _, _, box, _ = infos[index]
+        best: int | None = None
+        best_y: float | None = None
+        for other, (_, _, below, _) in enumerate(infos):
+            if other == index or below.y0 < box.y1 - 2:
+                continue
+            if not _same_column(box, below):
+                continue
+            if best_y is None or below.y0 < best_y:
+                best = other
+                best_y = below.y0
+        return best
+
+    successors: dict[int, int] = {}
+    for index, (_, _, box, _) in enumerate(infos):
+        nxt = next_below(index)
+        if nxt is None:
+            continue
+        if is_line_wrap(box, infos[nxt][2]) and reaches(box):
+            successors[index] = nxt
+    # A short middle piece (イザ) continues onto the following line.
+    growing = True
+    while growing:
+        growing = False
+        for index, nxt in list(successors.items()):
+            if nxt in successors:
+                continue
+            further = next_below(nxt)
+            if further is None:
+                continue
+            if infos[nxt][3] <= 12 and is_line_wrap(infos[nxt][2], infos[further][2]):
+                successors[nxt] = further
+                growing = True
+    return [((infos[index][0], infos[index][1]), (infos[nxt][0], infos[nxt][1])) for index, nxt in successors.items()]
 
 
 def wrap_pairs(
@@ -189,12 +286,8 @@ def wrap_pairs(
     """Line pairs whose text should be read as one wrapped line."""
     pairs: list[tuple[tuple[PageIndex, int, int], tuple[PageIndex, int, int]]] = []
     for page in pages:
-        runs = _body_runs(page)
-        for (start, stop), (nxt, nxt_stop) in zip(runs, runs[1:]):
-            left = page.lines[page.glyphs[start].line_id].bbox
-            right = page.lines[page.glyphs[nxt].line_id].bbox
-            if is_line_wrap(left, right):
-                pairs.append(((page, start, stop), (page, nxt, nxt_stop)))
+        for left, right in _column_wraps(page):
+            pairs.append(((page, left[0], left[1]), (page, right[0], right[1])))
     for previous, nxt in zip(pages, pages[1:]):
         if not previous.glyphs or not nxt.glyphs:
             continue

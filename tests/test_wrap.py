@@ -6,7 +6,20 @@ import pymupdf
 
 from ekisui.domain.normalize import load_confusables, strict_text
 from ekisui.domain.session import Session, TermGroup, TrackedHit
-from ekisui.domain.types import Action, Category, Hit, MatchKind, Rect, SaveOptions, Settings
+from ekisui.domain.types import (
+    Action,
+    Category,
+    Document,
+    Hit,
+    MatchKind,
+    Page,
+    PageKind,
+    Rect,
+    SaveOptions,
+    Settings,
+    TextLine,
+    TextSource,
+)
 from ekisui.pdf.document import open_document
 from ekisui.pdf.export import export_pdf
 from ekisui.pdf.verify import verify_pdf
@@ -223,6 +236,8 @@ def test_leftover_check_flags_a_wrapped_vowel_that_was_left_behind(tmp_path):
     page.insert_text((56, 104), "ーの選任および監督について責任を負う。", fontname="japan", fontsize=10.5)
     doc.save(path)
     doc.close()
+    opened = open_document(path)
+    tail = next(line for line in opened.pages[0].lines if line.text.startswith("ー"))
     group = TermGroup(
         id="g1",
         canonical=TERM,
@@ -232,7 +247,15 @@ def test_leftover_check_flags_a_wrapped_vowel_that_was_left_behind(tmp_path):
         hits=[
             TrackedHit(
                 "h1",
-                Hit(0, TERM, Rect(0, 0, 10, 10), MatchKind.EXACT, 1.0, "", ()),
+                Hit(
+                    0,
+                    "専門アドバイザ",
+                    Rect(tail.bbox.x0, tail.bbox.y0 - 18, tail.bbox.x0 + 80, tail.bbox.y0 - 4),
+                    MatchKind.FUZZY,
+                    0.875,
+                    "",
+                    (),
+                ),
                 True,
             )
         ],
@@ -279,6 +302,122 @@ def test_scanned_pdf_redacts_a_wrapped_term(tmp_path):
     assert not any(line.strip().startswith(("ー", "一")) for line in saved.splitlines()), saved
     report = verify_pdf(str(dest), session.groups, session.settings, session.table, False)
     assert report.clean, [(item.term, item.explanation) for item in report.leftovers]
+
+
+def _placed(lines: list[tuple[str, float, float, float]]) -> Document:
+    """Lines are (text, x, y, x1). x1 lets a full line reach the column edge."""
+    built = []
+    for index, (text, x, y, x1) in enumerate(lines):
+        built.append(
+            TextLine(
+                id=f"p0l{index}",
+                page_index=0,
+                text=text,
+                bbox=Rect(x, y, x1, y + 12.0),
+                confidence=1.0,
+                source=TextSource.NATIVE,
+            )
+        )
+    return Document(
+        source_path="columns.pdf",
+        pages=(
+            Page(
+                index=0,
+                width=600.0,
+                height=840.0,
+                kind=PageKind.NATIVE,
+                lines=tuple(built),
+                source_index=0,
+            ),
+        ),
+    )
+
+
+def test_three_line_wrap_is_one_replacement(tmp_path: Path) -> None:
+    path = tmp_path / "three.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((56, 80), "開示先の前文です専門アドバ", fontname="japan", fontsize=11)
+    page.insert_text((56, 112), "イザ", fontname="japan", fontsize=11)
+    page.insert_text((56, 144), "ーです。", fontname="japan", fontsize=11)
+    doc.save(path)
+    doc.close()
+    opened = open_document(path)
+    session = Session(opened, Settings(fuzzy_threshold=0.60))
+    group = session.add_phrase(TERM)
+    assert group is not None
+    assert group.action == Action.REPLACE
+    assert any("ー" in strict_text(tracked.hit.surface) for tracked in group.included_hits())
+    dest = tmp_path / "three_Masked.pdf"
+    export_pdf(
+        opened,
+        session.groups,
+        dest,
+        SaveOptions(align_box_width=False, strip_metadata=True, export_log=False, export_replacement_table=False),
+        session.settings,
+    )
+    saved = pymupdf.open(dest)[0].get_text()
+    assert "ー" not in saved
+    assert "呼称A" in saved
+    report = verify_pdf(str(dest), session.groups, session.settings, session.table, False)
+    assert report.clean, [(item.term, item.explanation) for item in report.leftovers]
+
+
+def test_column_wrap_does_not_eat_the_other_column(tmp_path: Path) -> None:
+    document = _placed(
+        [
+            ("左列専門アドバイザ", 72, 100, 400),
+            ("右列は別の文章です", 430, 100, 560),
+            ("ーの選任について", 72, 122, 220),
+            ("右側の続きです", 430, 122, 560),
+        ]
+    )
+    session = Session(document, Settings(fuzzy_threshold=0.60))
+    group = session.add_phrase(TERM)
+    assert group is not None
+    assert "ー" in strict_text(group.hits[0].hit.surface)
+    assert "右" not in strict_text(group.hits[0].hit.surface)
+
+
+def test_wrapped_account_is_not_replaced_by_an_unchecked_alnum() -> None:
+    document = document_from_lines([["普通預金口座番号1234567", "A社名義の口座に振り込む。"]], gap=32.0)
+    session = Session(document, Settings())
+    session.rescan()
+    accounts = [group for group in session.groups if group.category == Category.ACCOUNT]
+    assert accounts and any(hit.included for group in accounts for hit in group.hits)
+    assert any("1234567" in group.canonical for group in accounts)
+
+
+def test_verify_flags_a_vowel_left_just_below_a_short_hit(tmp_path: Path) -> None:
+    path = tmp_path / "tail.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((56, 80), "前文です", fontname="japan", fontsize=12)
+    page.insert_text((56, 110), "ーの後文です。", fontname="japan", fontsize=12)
+    doc.save(path)
+    doc.close()
+    opened = open_document(path)
+    tail = next(line for line in opened.pages[0].lines if line.text.startswith("ー"))
+    hit = Hit(
+        0,
+        "専門アドバイザ",
+        Rect(tail.bbox.x0, tail.bbox.y0 - 18, tail.bbox.x0 + 90, tail.bbox.y0 - 4),
+        MatchKind.FUZZY,
+        0.875,
+        "",
+        (),
+    )
+    group = TermGroup(
+        id="g",
+        canonical=TERM,
+        category=Category.PHRASE,
+        action=Action.REPLACE,
+        pseudonym="呼称A",
+        hits=[TrackedHit("h", hit, True)],
+        origin="search",
+    )
+    report = verify_pdf(str(path), [group], Settings(), load_confusables(), False)
+    assert any(item.term.startswith("ー") for item in report.leftovers)
 
 
 def test_masking_finds_a_phone_split_across_a_wrap():

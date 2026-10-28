@@ -523,7 +523,6 @@ def _spans_across_wrap(
 
     for pattern, category in (
         (_EMAIL_RE, Category.EMAIL),
-        (_ALNUM_RE, Category.ALNUM),
         *((pattern, Category.COMPANY) for pattern in _COMPANY_RES),
     ):
         for match in pattern.finditer(text):

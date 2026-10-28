@@ -90,6 +90,7 @@ def verify_pdf(
                     )
                 leftovers.extend(_fragment_leftovers(index, query, seen))
                 leftovers.extend(_wrap_leftovers(index, query, seen))
+            leftovers.extend(_tails_below_hits(index, group, seen))
         metadata_clean = metadata_is_clean(opened) if check_metadata else None
         return VerifyReport(
             clean=not leftovers,
@@ -192,6 +193,53 @@ def _wrap_leftovers(index, query: str, seen: set) -> list[Leftover]:
                 explanation="行の先頭に語句の続きが残っています",
             )
         )
+    return found
+
+
+def _tails_below_hits(index, group: TermGroup, seen: set) -> list[Leftover]:
+    """A burned prefix can leave ー on the next line after the line gap has grown."""
+    needle = strict_text(group.canonical)
+    found: list[Leftover] = []
+    if len(needle) < 2:
+        return found
+    for tracked in group.included_hits():
+        surface = strict_text(tracked.hit.surface)
+        if len(surface) < 2 or not needle.startswith(surface) or len(surface) >= len(needle):
+            continue
+        missing = needle[len(surface) :]
+        rects = tracked.hit.parts or (tracked.hit.bbox,)
+        if not rects:
+            continue
+        bottom = max(rect.y1 for rect in rects)
+        pages = []
+        if 0 <= tracked.hit.page_index < len(index):
+            pages.append(index[tracked.hit.page_index])
+        if tracked.hit.page_index + 1 < len(index):
+            pages.append(index[tracked.hit.page_index + 1])
+        for page in pages:
+            for line in page.lines.values():
+                text = strict_text(line.text)
+                if not text.startswith(missing):
+                    continue
+                same_page = page.page_index == tracked.hit.page_index
+                if same_page and (line.bbox.y0 < bottom - 4 or line.bbox.y0 - bottom > 96):
+                    continue
+                if not same_page and line.bbox.y0 > 140:
+                    continue
+                key = (missing, page.page_index, int(line.bbox.x0), int(line.bbox.y0))
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append(
+                    Leftover(
+                        term=missing if len(missing) <= 8 else missing[:8],
+                        page_index=page.page_index,
+                        kind=MatchKind.EXACT,
+                        score=1.0,
+                        bbox=line.bbox,
+                        explanation="行の先頭に語句の続きが残っています",
+                    )
+                )
     return found
 
 

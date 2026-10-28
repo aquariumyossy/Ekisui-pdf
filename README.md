@@ -2,9 +2,19 @@
 
 日本語の法律文書 PDF を、そのパソコンの中だけで墨消しする Windows アプリです。易水会の勉強会で配ることを想定しています。通信はしません。OCR も墨消しも、開いた PDF も、外には出ません。
 
+![マスキング実行のあと。同梱の架空契約で、黒塗りと呼び名が出ている](docs/images/readme-hero.png)
+
 ライセンスは **AGPL-3.0** です。PDF の処理に PyMuPDF を使っているため、アプリ全体をこのライセンスで配布します。`LICENSE` と `THIRD_PARTY_NOTICES.md` を同梱しています。
 
 アイコンの「蕭」は、Noto Sans CJK JP（小さいサイズ）と Noto Serif CJK JP（大きいサイズ）の字形です。ライセンスは SIL Open Font License 1.1 で、全文は `assets/icon/` にあります。
+
+## 画面
+
+同梱の架空契約です。人物、会社、番号はすべて架空です。
+
+![スキャンを読み、OCR修正を開いたところ](docs/images/readme-ocr.png)
+
+![保存した架空契約_テキスト_Masked.pdf](docs/images/readme-masked.png)
 
 ## 動作環境
 

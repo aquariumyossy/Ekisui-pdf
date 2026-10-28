@@ -57,12 +57,9 @@ def test_ctrl_wheel_zooms_and_plain_wheel_does_not():
         Qt.ScrollPhase.NoScrollPhase,
         False,
     )
-    assert view.eventFilter(view.viewport(), plain) is False
-    assert zooms == []
-
     before = view.verticalScrollBar().value()
-    app.sendEvent(view.viewport(), plain)
-    app.processEvents()
+    assert view.eventFilter(view.viewport(), plain) is True
+    assert zooms == []
     assert view.verticalScrollBar().value() > before
 
     on_page = QWheelEvent(

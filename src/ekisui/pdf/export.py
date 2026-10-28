@@ -68,6 +68,7 @@ def export_pdf(
     options: SaveOptions,
     settings: Settings | None = None,
     archived: list[TermGroup] | None = None,
+    prior_boxes: list[RedactionBox] | None = None,
 ) -> ExportResult:
     settings = settings or Settings()
     dest = Path(dest)
@@ -107,7 +108,7 @@ def export_pdf(
     base = dest.stem[: -len("_墨消し")] if dest.stem.endswith("_墨消し") else dest.stem
     if options.export_log:
         log_path = dest.with_name(base + "_墨消し記録.csv")
-        earlier = redaction_boxes(document, archived, options, settings)
+        earlier = list(prior_boxes) if prior_boxes is not None else redaction_boxes(document, archived, options, settings)
         write_log(log_path, [*earlier, *boxes], options.include_original_terms)
     if options.export_replacement_table:
         table_path = dest.with_name(base + "_置換表.csv")
@@ -314,7 +315,7 @@ def bake_redactions(
     settings: Settings,
     work_dir: str | Path,
     align_box_width: bool,
-) -> Document:
+) -> tuple[Document, list[RedactionBox]]:
     """Burn included hits into a new PDF and drop them from the text layer.
 
     The file the user opened is not modified. Later reads use ``working_path``.
@@ -328,7 +329,7 @@ def bake_redactions(
     )
     boxes = redaction_boxes(document, groups, options, settings)
     if not boxes:
-        return document
+        return document, []
     directory = Path(work_dir)
     directory.mkdir(parents=True, exist_ok=True)
     by_page: dict[int, list[RedactionBox]] = {}
@@ -355,6 +356,11 @@ def bake_redactions(
                     source_index=len(pages),
                     source_width=page.width,
                     source_height=page.height,
+                    # The baked page is already upright. Leaving the old turn
+                    # would move a later range when OCR runs again.
+                    rotation=0,
+                    skew=0.0,
+                    quarter=0,
                 )
             )
         baked = _unique_file(directory, "session-redacted", ".pdf")
@@ -362,7 +368,7 @@ def bake_redactions(
     finally:
         output.close()
         source.close()
-    return replace(document, working_path=str(baked), pages=tuple(pages))
+    return replace(document, working_path=str(baked), pages=tuple(pages)), boxes
 
 
 def _unique_file(directory: Path, stem: str, suffix: str) -> Path:
@@ -377,6 +383,7 @@ def _unique_file(directory: Path, stem: str, suffix: str) -> Path:
 def _lines_after_redaction(page: Page, boxes: list[RedactionBox]) -> tuple[TextLine, ...]:
     if not boxes:
         return page.lines
+    used_ids = {line.id for line in page.lines}
     kept: list[TextLine] = []
     for line in page.lines:
         cells = _cells(line)
@@ -402,9 +409,14 @@ def _lines_after_redaction(page: Page, boxes: list[RedactionBox]) -> tuple[TextL
             continue
         if _covered_by_blackout(box, blackouts):
             continue
+        number = 0
+        while f"p{page.index}baked{number}" in used_ids:
+            number += 1
+        line_id = f"p{page.index}baked{number}"
+        used_ids.add(line_id)
         kept.append(
             TextLine(
-                id=f"p{page.index}baked{len(kept)}",
+                id=line_id,
                 page_index=page.index,
                 text=box.pseudonym,
                 bbox=box.rect,

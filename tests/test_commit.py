@@ -269,3 +269,59 @@ def test_second_bake_on_a_scan_keeps_the_first_pixels(tmp_path):
     assert "控える文章" in _text(dest)
     assert _dark_pdf(dest, 0, Rect(40, 30, 200, 80)) > 0.75
     assert _dark_pdf(dest, 0, Rect(40, 140, 220, 190)) > 0.75
+
+
+def test_second_replacement_keeps_a_unique_line_id_and_the_same_name(tmp_path):
+    path = tmp_path / "two.pdf"
+    document = pymupdf.open()
+    for _index in range(2):
+        page = document.new_page()
+        page.insert_text((72, 80), "株式会社サンプル商事", fontname="japan", fontsize=14)
+        page.insert_text((72, 200), "山田太郎", fontname="japan", fontsize=14)
+    document.save(path)
+    document.close()
+    from dataclasses import replace
+
+    session = Session(open_document(path), Settings())
+    turned = replace(session.document.pages[0], rotation=90, skew=1.2, quarter=90)
+    session.document = replace(session.document, pages=(turned, session.document.pages[1]))
+    company = session.add_phrase("株式会社サンプル商事")
+    assert company is not None
+    for tracked in company.hits:
+        if tracked.hit.page_index == 1:
+            tracked.included = False
+    session.commit_redactions(tmp_path, False)
+    assert session.document.pages[0].rotation == 0
+    assert session.document.pages[0].skew == 0
+    assert session.document.pages[0].quarter == 0
+    session.rescan()
+    again = next(group for group in session.groups if "サンプル" in group.canonical)
+    assert again.pseudonym == "会社A"
+    person = session.add_phrase("山田太郎")
+    assert person is not None
+    session.commit_redactions(tmp_path, False)
+    ids = [line.id for page in session.document.pages for line in page.lines]
+    assert len(ids) == len(set(ids))
+    assert session.committed[0].pseudonym == "会社A"
+
+
+def test_zoom_stays_on_the_lower_page(tmp_path):
+    from PySide6.QtWidgets import QApplication
+
+    from ekisui.gui.window import MainWindow
+
+    path = tmp_path / "pages.pdf"
+    _native_pdf(path)
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.open_path(str(path))
+    window.resize(900, 500)
+    window.show()
+    app.processEvents()
+    window._goto(1)
+    app.processEvents()
+    window._set_zoom(2.0)
+    app.processEvents()
+    assert window.view.verticalScrollBar().value() > 80
+    window.close()
+    app.processEvents()

@@ -38,6 +38,8 @@ def test_stack_centers_a_narrow_page_and_scroll_crosses_the_gap():
     spans = [(y, height) for (_x, y), (_w, height) in zip(placed, [(200, 400), (100, 300)])]
     assert page_at_scroll(spans, 0, 180, gap=16) == 0
     assert page_at_scroll(spans, 360, 180, gap=16) == 1
+    short = [(0, 400), (416, 80)]
+    assert page_at_scroll(short, 296, 200, gap=16) == 1
 
 
 def test_scroll_keeps_a_point_on_a_lower_page():

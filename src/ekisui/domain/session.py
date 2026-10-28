@@ -73,6 +73,8 @@ class Session:
         # Hits whose pixels and text have already been burned into the page.
         # They are not editable and are not cleared when a new range is added.
         self.committed: list[TermGroup] = []
+        # Rectangles actually burned, so the log does not recompute them later.
+        self.burned_boxes: list = []
 
     def index(self) -> tuple[PageIndex, ...]:
         if self._index is None:
@@ -387,10 +389,11 @@ class Session:
 
     def renumber(self) -> None:
         for group in self.groups:
-            if group.action == Action.REPLACE:
-                group.pseudonym = None
-        for group in self.groups:
             if group.action != Action.REPLACE:
+                continue
+            group.pseudonym = self._pinned_pseudonym(group.canonical, group.category)
+        for group in self.groups:
+            if group.action != Action.REPLACE or group.pseudonym:
                 continue
             group.pseudonym = self._allocate(group.category)
         self.confirmed = False
@@ -402,22 +405,42 @@ class Session:
             included = [hit for hit in group.hits if hit.included]
             if included:
                 pending.append(replace(group, hits=list(included)))
+        before = {line.id: line.text for page in self.document.pages for line in page.lines}
         if pending:
             from ekisui.pdf.export import bake_redactions
 
-            self.document = bake_redactions(
+            self.document, boxes = bake_redactions(
                 self.document,
                 pending,
                 self.settings,
                 work_dir,
                 align_box_width,
             )
+            self.burned_boxes.extend(boxes)
             self._index = None
+        after = {line.id: line.text for page in self.document.pages for line in page.lines}
+        changed = {line_id for line_id, text in before.items() if after.get(line_id) != text}
+        for group in self.groups:
+            for tracked in group.hits:
+                ids = {tracked.line_id, *tracked.hit.line_ids}
+                if ids & changed:
+                    tracked.line_id = ""
+                    tracked.start = -1
+                    tracked.end = -1
+                    tracked.original_start = -1
+                    tracked.original_end = -1
         for group in self.groups:
             group.hits = [hit for hit in group.hits if not hit.included]
         self.groups = [group for group in self.groups if group.hits]
         self.committed.extend(pending)
         self.confirmed = True
+
+    def _pinned_pseudonym(self, canonical: str, category: Category) -> str | None:
+        key = _group_key(canonical, category)
+        for group in self.committed:
+            if group.category == category and _group_key(group.canonical, category) == key and group.pseudonym:
+                return group.pseudonym
+        return None
 
     def import_rows(self, rows: list[tuple[str, str, str, str]]) -> None:
         """Rows are (category label, canonical, pseudonym, variants joined by |)."""
@@ -458,7 +481,7 @@ class Session:
         pseudonym: str | None = None,
     ) -> TermGroup:
         chosen = action or DEFAULT_ACTION[category]
-        name = pseudonym
+        name = pseudonym or (self._pinned_pseudonym(canonical, category) if chosen == Action.REPLACE else None)
         if chosen == Action.REPLACE and not name:
             name = self._allocate(category)
         group = TermGroup(

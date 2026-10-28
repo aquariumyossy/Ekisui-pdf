@@ -961,7 +961,7 @@ class MainWindow(QMainWindow):
         for group in self.session.groups:
             for tracked in group.hits:
                 if tracked.id == hit_id:
-                    self._goto(tracked.hit.page_index)
+                    self._goto(tracked.hit.page_index, scroll=tracked.hit.page_index != self.page_index)
                     return
 
     def _exclude(self) -> None:
@@ -1014,7 +1014,7 @@ class MainWindow(QMainWindow):
                 if line.id == line_id:
                     self.show_lines = True
                     self.line_toggle.setChecked(True)
-                    self._goto(page.index)
+                    self._goto(page.index, scroll=page.index != self.page_index)
                     self.canvas.begin_edit(line)
                     return
 
@@ -1032,11 +1032,12 @@ class MainWindow(QMainWindow):
         self.preview = False
         self.refresh()
 
-    def _goto(self, index: int) -> None:
+    def _goto(self, index: int, scroll: bool = True) -> None:
         if not self.session:
             return
         self.page_index = max(0, min(index, len(self.session.document.pages) - 1))
-        self._scroll_target = self.page_index
+        if scroll:
+            self._scroll_target = self.page_index
         self.refresh()
 
     def _move_page(self, delta: int) -> None:
@@ -1058,10 +1059,35 @@ class MainWindow(QMainWindow):
 
     def _apply_zoom(self, rerender: bool) -> None:
         self.zoom_label.setText(f"{round(self.zoom * 100)}%")
-        if not self.session:
+        if not self.session or not self.view.column.canvases:
             return
-        for canvas in self.view.column.canvases:
-            canvas.set_zoom(self.zoom)
+        viewport = self.view.viewport()
+        center = QPointF(max(viewport.width(), 1) / 2, max(viewport.height(), 1) / 2)
+        canvas = self._canvas_under(center) or self.canvas
+        anchor = None
+        if canvas is not None and canvas.zoom > 0:
+            local = canvas.mapFrom(viewport, QPoint(int(center.x()), int(center.y())))
+            page_x, page_y = canvas.page_point(QPointF(local))
+            anchor = (page_x, page_y, canvas)
+        self.view._lock = True
+        try:
+            for item in self.view.column.canvases:
+                item.set_zoom(self.zoom)
+        finally:
+            self.view._lock = False
+        if anchor is not None:
+            page_x, page_y, canvas = anchor
+            scroll_x, scroll_y = scroll_to_keep_point(
+                page_x,
+                page_y,
+                self.zoom,
+                center.x(),
+                center.y(),
+                canvas.x() + canvas._origin.x(),
+                canvas.y() + canvas._origin.y(),
+            )
+            self.view.horizontalScrollBar().setValue(int(round(scroll_x)))
+            self.view.verticalScrollBar().setValue(int(round(scroll_y)))
         if rerender:
             self._rerender_current()
 
@@ -1266,11 +1292,13 @@ class MainWindow(QMainWindow):
         ocr_only = QPushButton("OCRだけ保存する")
         _mark(ocr_only, "btn")
         ocr_only.setEnabled(self.ocr_ran)
-        ocr_only.setToolTip(
-            "マスキングせず、読み取ったPDFだけを別名で保存します。"
-            if self.ocr_ran
-            else "文字の読み取りがまだなので、読み取ったPDFは保存できません。"
-        )
+        if self.session.committed and self.ocr_ran:
+            ocr_tip = "すでに確定したマスキングは残したまま、読み取ったPDFを別名で保存します。"
+        elif self.ocr_ran:
+            ocr_tip = "マスキングせず、読み取ったPDFだけを別名で保存します。"
+        else:
+            ocr_tip = "文字の読み取りがまだなので、読み取ったPDFは保存できません。"
+        ocr_only.setToolTip(ocr_tip)
         ocr_only.clicked.connect(lambda: self._open_save_dialog("ocr"))
         go = QPushButton("確定に進む")
         _mark(go, "primary")
@@ -1393,6 +1421,7 @@ class MainWindow(QMainWindow):
                 options,
                 self.session.settings,
                 archived=self.session.committed if masked else None,
+                prior_boxes=self.session.burned_boxes if masked else None,
             )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "ekisui-pdf", f"保存できませんでした。\n{exc}")

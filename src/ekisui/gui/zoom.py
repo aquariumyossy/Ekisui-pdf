@@ -29,6 +29,9 @@ def page_at_scroll(spans: list[tuple[int, int]], scroll: int, viewport: int, gap
     """
     if not spans:
         return 0
+    end = spans[-1][0] + spans[-1][1]
+    if scroll > 0 and scroll + viewport >= end - 2:
+        return len(spans) - 1
     probe = scroll + max(1, int(viewport * 0.35))
     for index, (top, height) in enumerate(spans):
         limit = top + height

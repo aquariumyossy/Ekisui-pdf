@@ -16,7 +16,11 @@ _MARKER_TIP = "手動で範囲を調整しました。"
 
 
 def _turn_wheel(view: "PageView", event) -> bool:
-    """Scroll the stacked pages, or zoom when Ctrl is held. The page is the widget under the cursor, so the scroll area never sees the event itself."""
+    """Scroll the stacked pages, or zoom when Ctrl is held.
+
+    The page widget is what the cursor is over, so this is the handler for
+    both the page and the gray margin. Small touchpad deltas accumulate.
+    """
     if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
         delta = event.angleDelta().y() or event.pixelDelta().y()
         if delta:
@@ -28,9 +32,16 @@ def _turn_wheel(view: "PageView", event) -> bool:
     pixel = event.pixelDelta()
     if pixel.isNull():
         angle = event.angleDelta()
-        pixel = QPoint(int(round(angle.x() / 120 * 48)), int(round(angle.y() / 120 * 48)))
-    if pixel.isNull():
-        return False
+        view._wheel_x += angle.x() / 120.0 * 48.0
+        view._wheel_y += angle.y() / 120.0 * 48.0
+        move_x = int(view._wheel_x)
+        move_y = int(view._wheel_y)
+        view._wheel_x -= move_x
+        view._wheel_y -= move_y
+        pixel = QPoint(move_x, move_y)
+    if pixel.x() == 0 and pixel.y() == 0:
+        event.accept()
+        return True
     view.horizontalScrollBar().setValue(view.horizontalScrollBar().value() - pixel.x())
     view.verticalScrollBar().setValue(view.verticalScrollBar().value() - pixel.y())
     event.accept()
@@ -484,6 +495,8 @@ class PageView(QScrollArea):
         self.viewport().installEventFilter(self)
         self.viewport().grabGesture(Qt.GestureType.PinchGesture)
         self._lock = False
+        self._wheel_x = 0.0
+        self._wheel_y = 0.0
         self.horizontalScrollBar().valueChanged.connect(self._reposition_edits)
         self.verticalScrollBar().valueChanged.connect(self._reposition_edits)
         self.verticalScrollBar().valueChanged.connect(self._emit_page)
@@ -518,18 +531,11 @@ class PageView(QScrollArea):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        canvas = self.widget()
-        if isinstance(canvas, PageCanvas):
-            canvas.reposition_edit()
+        self._reposition_edits()
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
         if obj is self.viewport() and event.type() == QEvent.Type.Wheel:
-            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-                delta = event.angleDelta().y()
-                if delta:
-                    factor = 1.15 if delta > 0 else 1 / 1.15
-                    self.zoomRequested.emit(factor, QPointF(event.position()), True)
-                return True
+            return _turn_wheel(self, event)
         if obj is self.viewport() and event.type() == QEvent.Type.NativeGesture:
             if event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
                 factor = 1.0 + float(event.value())

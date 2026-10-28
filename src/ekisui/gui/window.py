@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import tempfile
 import threading
@@ -8,7 +9,7 @@ from pathlib import Path
 
 import pymupdf
 from PySide6.QtCore import QPoint, QPointF, QSettings, Qt, QThread, Signal
-from PySide6.QtGui import QFont, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QFont, QFontMetricsF, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -120,6 +121,8 @@ class OcrWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        self._dialog_kind = ""
+        self._sizing_settings = False
         self.setWindowTitle("ekisui-pdf")
         self.setWindowIcon(load_app_icon())
         self.resize(1280, 800)
@@ -448,6 +451,13 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self.shade.setGeometry(self.centralWidget().rect())
+        if self._dialog_kind == "settings" and self.shade.isVisible() and not self._sizing_settings:
+            self._sizing_settings = True
+            try:
+                self._apply_settings_frame()
+                self._refit_settings_labels()
+            finally:
+                self._sizing_settings = False
         self.card.move(max(160, (self.width() - 360) // 2), 160)
         self._place_ocr_pop()
         if self.fit_mode and self.session:
@@ -1647,8 +1657,6 @@ class MainWindow(QMainWindow):
     def _open_settings(self) -> None:
         current = self.session.settings if self.session else self.settings
         self._clear_dialog()
-        self.dialog.setFixedWidth(_SETTINGS_DIALOG_WIDTH)
-        self.dialog.setMaximumHeight(760)
         title = QLabel(SETTINGS_TITLE)
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
         title.setWordWrap(True)
@@ -1686,22 +1694,28 @@ class MainWindow(QMainWindow):
         self.dialog_layout.addWidget(self._info_row(self.fuzzy_label, SETTINGS_FUZZY_TIP))
         self.dialog_layout.addWidget(self._fuzzy_scale())
         self.dialog_layout.addWidget(self._info_row(self.review_label, SETTINGS_REVIEW_TIP))
-        self.dialog_layout.addWidget(self.review)
+        self.dialog_layout.addWidget(self.review, 0, Qt.AlignmentFlag.AlignLeft)
         self.dialog_layout.addWidget(box_heading)
         self.dialog_layout.addWidget(self._info_row(self.align_label, SETTINGS_ALIGN_TIP))
-        self.dialog_layout.addWidget(self.align)
+        self.dialog_layout.addWidget(self.align, 0, Qt.AlignmentFlag.AlignLeft)
         self.dialog_layout.addLayout(buttons)
-        content_width = _SETTINGS_DIALOG_WIDTH - 36 - 22 - 16
-        for label in (title, read_heading, box_heading):
-            self._fit_wrapped(label, _SETTINGS_DIALOG_WIDTH - 36)
-        for label in (self.fuzzy_label, self.review_label, self.align_label):
-            self._fit_wrapped(label, content_width)
+        self._settings_labels = (title, read_heading, self.fuzzy_label, self.review_label, box_heading, self.align_label)
+        self._dialog_kind = "settings"
+        self._apply_settings_frame()
+        self._refit_settings_labels()
         self._show_shade()
+
+    def _apply_settings_frame(self) -> None:
+        host = self.centralWidget()
+        width = min(_SETTINGS_DIALOG_WIDTH, max(320, host.width() - 24))
+        self.dialog.setFixedWidth(width)
+        self.dialog.setMaximumHeight(max(640, host.height() - 24))
 
     def _settings_heading(self, text: str) -> QLabel:
         label = QLabel(text)
         label.setWordWrap(True)
-        label.setStyleSheet("font-size: 15px; font-weight: 600; padding-top: 8px;")
+        label.setIndent(0)
+        label.setStyleSheet("font-size: 15px; font-weight: 600; margin-top: 8px;")
         return label
 
     def _fuzzy_scale(self) -> QWidget:
@@ -1719,15 +1733,27 @@ class MainWindow(QMainWindow):
         layout.addWidget(high)
         return row
 
+    def _refit_settings_labels(self) -> None:
+        if self._dialog_kind != "settings":
+            return
+        labels = getattr(self, "_settings_labels", ())
+        content = self.dialog.width() - 36 - 22 - 16
+        for label in labels:
+            limit = self.dialog.width() - 36 if label not in (self.fuzzy_label, self.review_label, self.align_label) else content
+            self._fit_wrapped(label, limit)
+
     def _fit_wrapped(self, label: QLabel, width: int) -> None:
         metrics = label.fontMetrics()
-        single = metrics.horizontalAdvance(label.text())
-        if single <= width:
+        single = math.ceil(QFontMetricsF(label.font()).horizontalAdvance(label.text()))
+        limit = max(width, 1)
+        if single <= limit:
             label.setMinimumWidth(single)
+            label.setMaximumWidth(16777215)
             label.setMinimumHeight(metrics.height())
             return
-        label.setMinimumWidth(width)
-        rect = metrics.boundingRect(0, 0, max(width, 1), 2000, int(Qt.TextFlag.TextWordWrap), label.text())
+        label.setMinimumWidth(0)
+        label.setMaximumWidth(limit)
+        rect = metrics.boundingRect(0, 0, limit, 2000, int(Qt.TextFlag.TextWordWrap), label.text())
         label.setMinimumHeight(max(rect.height(), metrics.height()))
 
     def _info_row(self, label: QLabel, tip: str) -> QWidget:
@@ -1760,6 +1786,8 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def _clear_dialog(self) -> None:
+        self._dialog_kind = ""
+        self._settings_labels = ()
         self.dialog.setFixedWidth(_DIALOG_WIDTH)
         self.dialog.setMaximumHeight(640)
         self._discard_layout(self.dialog_layout)

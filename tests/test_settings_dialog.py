@@ -137,3 +137,57 @@ def test_settings_dialog_wording_keeps_ranges_and_values() -> None:
     assert window.dialog.width() == 540
     window.close()
     app.processEvents()
+
+
+def _inside_window(window: MainWindow, widget) -> None:
+    origin = widget.mapTo(window, QPoint(0, 0))
+    assert origin.x() >= -1
+    assert origin.y() >= -1
+    assert origin.x() + widget.width() <= window.width() + 1
+    assert origin.y() + widget.height() <= window.height() + 1
+
+
+def test_settings_dialog_stays_inside_a_narrow_window() -> None:
+    from PySide6.QtGui import QFont, QFontDatabase
+
+    from ekisui.gui.theme import QSS
+
+    app = QApplication.instance() or QApplication([])
+    previous_sheet = app.styleSheet()
+    font_path = "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"
+    if os.path.exists(font_path):
+        QFontDatabase.addApplicationFont(font_path)
+        font = QFont("WenQuanYi Micro Hei")
+        font.setPixelSize(14)
+        app.setFont(font)
+    app.setStyleSheet(QSS)
+    window = MainWindow()
+    try:
+        window.resize(1280, 800)
+        window.show()
+        app.processEvents()
+        window._open_settings()
+        app.processEvents()
+        assert window.dialog.width() == 720
+        assert window.fuzzy_label.height() < window.fuzzy_label.fontMetrics().lineSpacing() * 2
+        assert window.review.width() < 160
+        assert window.align.width() < 160
+        hint = window.minimumSizeHint()
+        window.resize(hint.width(), hint.height())
+        app.processEvents()
+        assert window.dialog.width() <= window.width() - 8
+        _inside_window(window, window.dialog)
+        high = next(label for label in window.dialog.findChildren(QLabel) if label.text() == SETTINGS_FUZZY_HIGH)
+        apply = next(button for button in window.dialog.findChildren(QPushButton) if button.text() == "適用")
+        _inside_window(window, high)
+        _inside_window(window, apply)
+        _assert_fully_visible(window, window.fuzzy_label)
+        _assert_fully_visible(window, window.review_label)
+        _assert_fully_visible(window, window.align_label)
+        assert window.fuzzy.value() == 60
+        assert window.review.value() == 80
+        assert window.align.value() == 5
+        window.close()
+        app.processEvents()
+    finally:
+        app.setStyleSheet(previous_sheet)

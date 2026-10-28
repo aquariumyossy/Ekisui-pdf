@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pymupdf
 
-from ekisui.domain.index import build_document_index
+from ekisui.domain.index import build_document_index, is_line_wrap, is_page_wrap, line_runs, parts_of
 from ekisui.domain.match import search_pages
 from ekisui.domain.normalize import ConfusableTable, strict_text
 from ekisui.domain.session import TermGroup
@@ -89,6 +89,7 @@ def verify_pdf(
                         )
                     )
                 leftovers.extend(_fragment_leftovers(index, query, seen))
+                leftovers.extend(_wrap_leftovers(index, query, seen))
         metadata_clean = metadata_is_clean(opened) if check_metadata else None
         return VerifyReport(
             clean=not leftovers,
@@ -147,6 +148,70 @@ def _fragment_leftovers(index, query: str, seen: set) -> list[Leftover]:
                 )
             )
     return found
+
+
+def _wrap_leftovers(index, query: str, seen: set) -> list[Leftover]:
+    """A wrapped term can leave its tail, often 「ー」, at the start of the next line."""
+    needle = strict_text(query)
+    if len(needle) < 2:
+        return []
+    runs: list[tuple] = []
+    for page in index:
+        for start, stop in line_runs(page):
+            glyphs = page.glyphs[start:stop]
+            if glyphs:
+                runs.append((page, glyphs, "".join(glyph.strict for glyph in glyphs)))
+    found: list[Leftover] = []
+    for (left_page, _left_glyphs, left_text), (right_page, right_glyphs, right_text) in zip(runs, runs[1:]):
+        left_box = left_page.lines[_left_glyphs[0].line_id].bbox
+        right_box = right_page.lines[right_glyphs[0].line_id].bbox
+        same_page = left_page.page_index == right_page.page_index
+        if same_page:
+            if not is_line_wrap(left_box, right_box):
+                continue
+        elif right_page.page_index != left_page.page_index + 1 or not is_page_wrap(left_box, right_box):
+            continue
+        split = _suffix_at_start(needle, right_text)
+        if split is None:
+            continue
+        prefix, suffix = needle[:split], needle[split:]
+        if left_text.endswith(prefix):
+            continue
+        if len(suffix) < 2 and suffix[:1] not in "ーｰ々ゝゞ":
+            continue
+        chosen = []
+        acc = ""
+        for glyph in right_glyphs:
+            chosen.append(glyph)
+            acc += glyph.strict
+            if len(acc) >= len(suffix):
+                break
+        if not acc.startswith(suffix):
+            continue
+        rect = parts_of(chosen)[0]
+        key = (suffix, right_page.page_index, int(rect.x0), int(rect.y0))
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(
+            Leftover(
+                term=suffix,
+                page_index=right_page.page_index,
+                kind=MatchKind.EXACT,
+                score=1.0,
+                bbox=rect,
+                explanation="行の先頭に語句の続きが残っています",
+            )
+        )
+    return found
+
+
+def _suffix_at_start(needle: str, text: str) -> int | None:
+    """Index where the longest proper suffix of ``needle`` begins, if ``text`` starts with it."""
+    for split in range(1, len(needle)):
+        if text.startswith(needle[split:]):
+            return split
+    return None
 
 
 def metadata_is_clean(doc: pymupdf.Document) -> bool:

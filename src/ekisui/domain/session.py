@@ -442,11 +442,15 @@ class Session:
             if tracked.original_hit is None:
                 tracked.original_hit = tracked.hit
             tracked.adjusted = True
+            exact = cells[start]
+            for cell in cells[start + 1 : end]:
+                exact = exact.union(cell)
             tracked.hit = replace(
                 tracked.hit,
                 surface=line.text[start:end],
                 bbox=bbox_of_range(cells, start, end),
                 line_ids=(line.id,),
+                parts=(exact,),
             )
         self.confirmed = False
 

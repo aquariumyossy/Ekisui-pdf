@@ -9,6 +9,7 @@ from pathlib import Path
 import pymupdf
 
 from ekisui.domain.index import _cells, _char_weight
+from ekisui.domain.normalize import strict_text
 from ekisui.domain.session import TermGroup
 from ekisui.domain.tableio import groups_to_csv
 from ekisui.domain.types import Action, Document, Page, PageKind, Rect, SaveOptions, Settings, TextLine, TextSource
@@ -49,17 +50,25 @@ def redaction_boxes(
             pseudonym = group.pseudonym if action == Action.REPLACE else None
             if action == Action.REPLACE and not pseudonym:
                 action = Action.BLACKOUT
-            boxes.append(
-                RedactionBox(
-                    page_index=page.index,
-                    rect=_box_rect(tracked.hit.bbox, page, options.align_box_width, settings.align_chars),
-                    action=action,
-                    pseudonym=pseudonym,
-                    original=tracked.hit.surface,
-                    adjusted=tracked.adjusted,
-                    ocr_changed=tracked.ocr_changed,
+            rects = tracked.hit.parts or (tracked.hit.bbox,)
+            for rect in rects:
+                boxes.append(
+                    RedactionBox(
+                        page_index=page.index,
+                        rect=_box_rect(
+                            rect,
+                            page,
+                            _widen_short(tracked.hit, rect, options.align_box_width),
+                            settings.align_chars,
+                            exact=bool(tracked.hit.parts),
+                        ),
+                        action=action,
+                        pseudonym=pseudonym,
+                        original=tracked.hit.surface,
+                        adjusted=tracked.adjusted,
+                        ocr_changed=tracked.ocr_changed,
+                    )
                 )
-            )
     return boxes
 
 
@@ -439,8 +448,18 @@ def _covered_by_blackout(box: RedactionBox, blackouts: list[RedactionBox]) -> bo
     return any(other.rect.contains(cx, cy) and other is not box for other in blackouts)
 
 
-def _box_rect(bbox: Rect, page: Page, align: bool, chars: int) -> Rect:
-    rect = bbox.pad(1.0, 0.8)
+def _widen_short(hit, rect: Rect, align: bool) -> bool:
+    """A wrapped tail is short on the page. Widening it would cover the next word."""
+    if not align or len(hit.parts) > 1:
+        return False
+    approx = max(1.0, rect.width / max(rect.height, 8.0))
+    return len(strict_text(hit.surface)) <= approx + 1.5
+
+
+def _box_rect(bbox: Rect, page: Page, align: bool, chars: int, exact: bool = False) -> Rect:
+    # Exact glyph bounds stay off the next character. A horizontal pad deletes
+    # that whole character, because removal is per glyph.
+    rect = Rect(bbox.x0, bbox.y0 - 0.25, bbox.x1, bbox.y1 + 0.25) if exact else bbox.pad(1.0, 0.8)
     if align:
         em = max(rect.height, 8.0)
         width = max(rect.width, em * chars * 0.92)

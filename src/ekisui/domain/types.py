@@ -225,6 +225,9 @@ class Hit:
     ocr_like: bool = False
     # Every automatic hit starts checked, including a bare prefecture.
     checked: bool = True
+    # One rectangle per line. Redaction uses these so a wrapped word does not
+    # become one box covering both lines. Empty means ``bbox`` is the box.
+    parts: tuple[Rect, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -261,3 +264,4 @@ class Span:
     action: Action | None = None
     # Glyph indexes when the span is not one contiguous run (a name split by a gap).
     indexes: tuple[int, ...] = ()
+    parts: tuple[Rect, ...] = ()

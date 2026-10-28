@@ -4,9 +4,9 @@ import re
 from dataclasses import dataclass, replace
 
 from ekisui.domain.address import find_addresses, load_address_excludes
-from ekisui.domain.index import bbox_of, line_ids_of, surface_of
+from ekisui.domain.index import bbox_of, line_ids_of, parts_of, surface_of, wrap_pairs
 from ekisui.domain.match import search_pages
-from ekisui.domain.normalize import ConfusableTable, fold_digits
+from ekisui.domain.normalize import ConfusableTable, fold_digits, strict_text
 from ekisui.paths import resource_path
 from ekisui.domain.types import (
     Action,
@@ -103,12 +103,16 @@ def suggest(
         spans.extend(_page_spans(page, person_re, ordered_surnames))
         spans.extend(_address_spans(page, prefectures, excludes))
         spans.extend(_title_person_spans(page))
+    spans.extend(_wrap_candidate_spans(pages, person_re, ordered_surnames))
     spans = _resolve_overlaps(spans)
     spans.sort(key=lambda span: (-(span.end - span.start), _PRIORITY.get(span.category, 9), span.page_index, span.start))
     used: list[tuple[int, object]] = []
     groups: list[AutoGroup] = []
     for span in spans:
-        if any(box_page == span.page_index and iou(span.bbox, box) > 0.5 for box_page, box in used):
+        if any(
+            box_page == span.page_index and any(iou(rect, box) > 0.5 for rect in (span.parts or (span.bbox,)))
+            for box_page, box in used
+        ):
             continue
         # Each prefecture span is already complete. Searching its text would also
         # hit the same characters at the start of a longer address and drop that one.
@@ -117,17 +121,26 @@ def suggest(
         else:
             found = search_pages(pages, span.surface, settings, table)
             kept = [hit for hit in found if hit.kind == MatchKind.EXACT or hit.ocr_like]
-            if not any(hit.page_index == span.page_index and iou(hit.bbox, span.bbox) > 0.5 for hit in kept):
+            if not any(
+                hit.page_index == span.page_index
+                and any(iou(rect, other) > 0.5 for rect in _hit_rects(hit) for other in (span.parts or (span.bbox,)))
+                for hit in kept
+            ):
                 kept.insert(0, _hit_from_span(span))
         if not span.checked:
             kept = [replace(hit, checked=False) for hit in kept]
         deduped: list[Hit] = []
         for hit in kept:
-            if any(hit.page_index == other.page_index and iou(hit.bbox, other.bbox) > 0.8 for other in deduped):
+            if any(
+                hit.page_index == other.page_index
+                and any(iou(rect, other_rect) > 0.8 for rect in _hit_rects(hit) for other_rect in _hit_rects(other))
+                for other in deduped
+            ):
                 continue
             deduped.append(hit)
         for hit in deduped:
-            used.append((hit.page_index, hit.bbox))
+            for rect in _hit_rects(hit):
+                used.append((hit.page_index, rect))
         groups.append(AutoGroup(span.category, span.surface, tuple(deduped), span.action))
     return groups
 
@@ -319,6 +332,7 @@ def _span_from_glyphs(
         checked=checked,
         action=action,
         indexes=tuple(positions),
+        parts=parts_of(glyphs),
     )
 
 
@@ -432,6 +446,7 @@ def _make_span(page: PageIndex, start: int, end: int, category: Category) -> Spa
         bbox=bbox_of(glyphs),
         line_ids=line_ids_of(glyphs),
         category=category,
+        parts=parts_of(glyphs),
     )
 
 
@@ -446,6 +461,119 @@ def _hit_from_span(span: Span) -> Hit:
         line_ids=span.line_ids,
         ocr_like=False,
         checked=span.checked,
+        parts=span.parts,
+    )
+
+
+def _hit_rects(hit: Hit) -> tuple[Rect, ...]:
+    return hit.parts or (hit.bbox,)
+
+
+def _wrap_candidate_spans(
+    pages: tuple[PageIndex, ...] | list[PageIndex],
+    person_re: re.Pattern[str],
+    surnames: tuple[str, ...],
+) -> list[Span]:
+    """Patterns that start on one line and end on the next wrapped line."""
+    spans: list[Span] = []
+    for left, right in wrap_pairs(pages):
+        spans.extend(_spans_across_wrap(left, right, person_re, surnames))
+    return spans
+
+
+def _spans_across_wrap(
+    left: tuple[PageIndex, int, int],
+    right: tuple[PageIndex, int, int],
+    person_re: re.Pattern[str],
+    surnames: tuple[str, ...],
+) -> list[Span]:
+    left_page, left_start, left_stop = left
+    right_page, right_start, right_stop = right
+    cut = max(left_start, left_stop - 40)
+    stop = min(right_stop, right_start + 40)
+    if cut >= left_stop or right_start >= stop:
+        return []
+    join = left_stop - cut
+    text = left_page.strict[cut:left_stop] + right_page.strict[right_start:stop]
+    folded = fold_digits(text)
+    found: list[Span] = []
+
+    def add(local_start: int, local_end: int, category: Category, pattern: re.Pattern[str], haystack: str) -> None:
+        if local_end <= join or local_start >= join or local_end <= local_start:
+            return
+        # A token that already ends on this line is not a wrap. Extending it
+        # would swallow the next line (株式会社サンプル商事 / 被告…).
+        left = haystack[local_start:join]
+        done = pattern.match(left)
+        if done is not None and done.end() == len(left):
+            return
+        surface = text[local_start:local_end]
+        if left_page.page_index == right_page.page_index and left_stop == right_start:
+            pieces = ((left_page, cut + local_start, right_start + (local_end - join)),)
+        else:
+            pieces = (
+                (left_page, cut + local_start, left_stop),
+                (right_page, right_start, right_start + (local_end - join)),
+            )
+        for page, start, end in pieces:
+            span = _piece_span(page, start, end, category, surface)
+            if span is not None:
+                found.append(span)
+
+    for pattern, category in (
+        (_EMAIL_RE, Category.EMAIL),
+        (_ALNUM_RE, Category.ALNUM),
+        *((pattern, Category.COMPANY) for pattern in _COMPANY_RES),
+    ):
+        for match in pattern.finditer(text):
+            add(match.start(), match.end(), category, pattern, text)
+    for match in _PHONE_RE.finditer(folded):
+        digits = re.sub(r"\D", "", match.group(0))
+        if len(digits) not in {10, 11} and not match.group(0).startswith("+81"):
+            continue
+        if match.group(0).startswith("+81") and not 10 <= len(digits) <= 13:
+            continue
+        add(match.start(), match.end(), Category.PHONE, _PHONE_RE, folded)
+    for match in _POSTAL_RE.finditer(folded):
+        add(match.start(), match.end(), Category.POSTAL, _POSTAL_RE, folded)
+    for match in _ACCOUNT_RE.finditer(folded):
+        add(match.start(1), match.end(1), Category.ACCOUNT, _ACCOUNT_RE, folded)
+    for match in person_re.finditer(text):
+        surface = match.group(0)
+        given = surface
+        for surname in surnames:
+            if surface.startswith(surname):
+                given = surface[len(surname) :]
+                break
+        if not given or given in _GIVEN_STOP or given[0] in "はをがにでとものへや":
+            continue
+        add(match.start(), match.end(), Category.PERSON, person_re, text)
+    return found
+
+
+def _piece_span(
+    page: PageIndex,
+    start: int,
+    end: int,
+    category: Category,
+    surface: str,
+) -> Span | None:
+    if start < 0 or end > len(page.glyphs) or start >= end:
+        return None
+    if len(strict_text(surface)) < 2 and end - start < 2 and category not in {Category.ALNUM}:
+        return None
+    glyphs = list(page.glyphs[start:end])
+    if not glyphs:
+        return None
+    return Span(
+        page_index=page.page_index,
+        start=start,
+        end=end,
+        surface=surface,
+        bbox=bbox_of(glyphs),
+        line_ids=line_ids_of(glyphs),
+        category=category,
+        parts=parts_of(glyphs),
     )
 
 

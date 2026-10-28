@@ -15,6 +15,11 @@ _RIGHT_TIP = "右にドラッグすると範囲の末尾を1文字ずつ動か�
 _MARKER_TIP = "手動で範囲を調整しました。"
 
 
+def _hit_rects(hit: dict) -> tuple[Rect, ...]:
+    parts = hit.get("parts") or ()
+    return parts or (hit["bbox"],)
+
+
 def _exec_menu(menu: QMenu, pos) -> object:
     return menu.exec(pos)
 
@@ -365,7 +370,7 @@ class PageCanvas(QWidget):
 
     def _hit_at(self, x: float, y: float) -> dict | None:
         for hit in reversed(self.hits):
-            if hit["bbox"].contains(x, y):
+            if any(rect.contains(x, y) for rect in _hit_rects(hit)):
                 return hit
         return None
 
@@ -417,7 +422,6 @@ class PageCanvas(QWidget):
         if self.show_hits and not self.show_boxes:
             for hit in self.hits:
                 kind = hit["kind"]
-                mapped = self._map(hit["bbox"])
                 if kind == MatchKind.EXACT:
                     painter.setPen(QPen(QColor("#d4a000"), 1.4))
                     painter.setBrush(QColor(255, 215, 64, 130))
@@ -426,7 +430,9 @@ class PageCanvas(QWidget):
                     painter.setBrush(QColor(255, 160, 90, 120))
                 if hit["id"] == self.selected_hit:
                     painter.setPen(QPen(QColor("#0f6cbd"), 2.2))
-                painter.drawRect(mapped)
+                for rect in _hit_rects(hit):
+                    painter.drawRect(self._map(rect))
+                mapped = self._map(hit["bbox"])
                 if hit.get("adjusted"):
                     painter.setPen(Qt.PenStyle.NoPen)
                     painter.setBrush(QColor("#0f6cbd"))

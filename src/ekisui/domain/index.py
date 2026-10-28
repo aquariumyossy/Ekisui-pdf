@@ -106,11 +106,83 @@ def surface_of(glyphs: tuple[Glyph, ...] | list[Glyph], lines: dict[str, TextLin
     return "".join(parts)
 
 
+def parts_of(glyphs: tuple[Glyph, ...] | list[Glyph]) -> tuple[Rect, ...]:
+    """Exact glyph bounds, one rectangle per line. No padding."""
+    parts: list[Rect] = []
+    index = 0
+    while index < len(glyphs):
+        line_id = glyphs[index].line_id
+        end = index + 1
+        while end < len(glyphs) and glyphs[end].line_id == line_id:
+            end += 1
+        rect = glyphs[index].bbox
+        for glyph in glyphs[index + 1 : end]:
+            rect = rect.union(glyph.bbox)
+        parts.append(rect)
+        index = end
+    return tuple(parts)
+
+
 def bbox_of(glyphs: tuple[Glyph, ...] | list[Glyph]) -> Rect:
     rect = glyphs[0].bbox
     for glyph in glyphs[1:]:
         rect = rect.union(glyph.bbox)
     return rect.pad(0.6, 0.4)
+
+
+def line_runs(page: PageIndex) -> list[tuple[int, int]]:
+    """Glyph ranges, one per line, in reading order."""
+    runs: list[tuple[int, int]] = []
+    cursor = 0
+    glyphs = page.glyphs
+    while cursor < len(glyphs):
+        line_id = glyphs[cursor].line_id
+        end = cursor + 1
+        while end < len(glyphs) and glyphs[end].line_id == line_id:
+            end += 1
+        runs.append((cursor, end))
+        cursor = end
+    return runs
+
+
+def is_line_wrap(left: Rect, right: Rect) -> bool:
+    """True when ``right`` is the next wrapped line, not a new paragraph or column."""
+    gap = right.y0 - left.y1
+    height = max(left.height, right.height, 1.0)
+    # 22pt still covers a loosely leaded wrap. A blank line (the 24pt fixture) does not.
+    if gap < -height * 0.35 or gap >= max(height * 1.25, 22.0):
+        return False
+    return abs(right.x0 - left.x0) <= max(72.0, height * 4)
+
+
+def is_page_wrap(left: Rect, right: Rect) -> bool:
+    """The first line of the next page continues the last line when the margins match."""
+    height = max(left.height, right.height, 1.0)
+    return abs(right.x0 - left.x0) <= max(72.0, height * 4)
+
+
+def wrap_pairs(
+    pages: tuple[PageIndex, ...] | list[PageIndex],
+) -> list[tuple[tuple[PageIndex, int, int], tuple[PageIndex, int, int]]]:
+    """Line pairs whose text should be read as one wrapped line."""
+    pairs: list[tuple[tuple[PageIndex, int, int], tuple[PageIndex, int, int]]] = []
+    for page in pages:
+        runs = line_runs(page)
+        for (start, stop), (nxt, nxt_stop) in zip(runs, runs[1:]):
+            left = page.lines[page.glyphs[start].line_id].bbox
+            right = page.lines[page.glyphs[nxt].line_id].bbox
+            if is_line_wrap(left, right):
+                pairs.append(((page, start, stop), (page, nxt, nxt_stop)))
+    for previous, nxt in zip(pages, pages[1:]):
+        if not previous.glyphs or not nxt.glyphs:
+            continue
+        last = line_runs(previous)[-1]
+        first = line_runs(nxt)[0]
+        left = previous.lines[previous.glyphs[last[0]].line_id].bbox
+        right = nxt.lines[nxt.glyphs[first[0]].line_id].bbox
+        if is_page_wrap(left, right):
+            pairs.append(((previous, last[0], last[1]), (nxt, first[0], first[1])))
+    return pairs
 
 
 def line_ids_of(glyphs: tuple[Glyph, ...] | list[Glyph]) -> tuple[str, ...]:

@@ -1,8 +1,22 @@
 from __future__ import annotations
 
-from ekisui.domain.index import bbox_of, line_ids_of, surface_of
+from dataclasses import dataclass
+
+from ekisui.domain.index import bbox_of, line_ids_of, parts_of, surface_of, wrap_pairs
 from ekisui.domain.normalize import ConfusableTable, loose_text, strict_text
-from ekisui.domain.types import Hit, MatchKind, PageIndex, Rect, Settings
+from ekisui.domain.types import Glyph, Hit, MatchKind, PageIndex, Rect, Settings
+
+
+@dataclass(frozen=True)
+class _Match:
+    pieces: tuple[tuple[int, int, int], ...]
+    kind: MatchKind
+    score: float
+    explanation: str
+    ocr_like: bool
+
+    def length(self) -> int:
+        return sum(end - start for _page, start, end in self.pieces)
 
 
 def search_pages(
@@ -15,9 +29,13 @@ def search_pages(
     needle_loose = loose_text(term, table)
     if len(needle_strict) < 2:
         return []
-    hits: list[Hit] = []
+    found: list[_Match] = []
     for page in pages:
-        hits.extend(_search_page(page, needle_strict, needle_loose, settings, table))
+        found.extend(_search_page(page, needle_strict, needle_loose, settings, table))
+    found.extend(_search_wraps(pages, needle_strict, needle_loose, settings, table))
+    hits: list[Hit] = []
+    for match in _pick(found):
+        hits.extend(_hits_for(pages, match))
     return _dedup(hits)
 
 
@@ -34,8 +52,8 @@ def _search_page(
     needle_loose: str,
     settings: Settings,
     table: ConfusableTable,
-) -> list[Hit]:
-    found: list[tuple[int, int, MatchKind, float, str, bool]] = []
+) -> list[_Match]:
+    found: list[_Match] = []
     occupied: list[tuple[int, int]] = []
     for start, stop in page.paragraphs:
         strict = page.strict[start:stop]
@@ -48,25 +66,55 @@ def _search_page(
             if any(abs_start < end and start_ < abs_end for start_, end in occupied):
                 continue
             occupied.append((abs_start, abs_end))
-            found.append((abs_start, abs_end, kind, score, explanation, ocr_like))
-    hits: list[Hit] = []
-    for abs_start, abs_end, kind, score, explanation, ocr_like in found:
-        glyphs = page.glyphs[abs_start:abs_end]
-        if not glyphs:
-            continue
-        hits.append(
-            Hit(
-                page_index=page.page_index,
-                surface=surface_of(glyphs, page.lines),
-                bbox=bbox_of(glyphs),
-                kind=kind,
-                score=score,
-                explanation=explanation,
-                line_ids=line_ids_of(glyphs),
-                ocr_like=ocr_like,
+            found.append(
+                _Match(
+                    ((page.page_index, abs_start, abs_end),),
+                    kind,
+                    score,
+                    explanation,
+                    ocr_like,
+                )
             )
-        )
-    return hits
+    return found
+
+
+def _search_wraps(
+    pages: tuple[PageIndex, ...] | list[PageIndex],
+    needle_strict: str,
+    needle_loose: str,
+    settings: Settings,
+    table: ConfusableTable,
+) -> list[_Match]:
+    """A term split by a line break or a page break is still one match."""
+    if len(needle_strict) < 2:
+        return []
+    slack = _max_distance(len(needle_strict), settings.fuzzy_threshold)
+    take = len(needle_strict) + slack
+    found: list[_Match] = []
+    for (left_page, left_start, left_stop), (right_page, right_start, right_stop) in wrap_pairs(pages):
+        cut = max(left_start, left_stop - take)
+        right_end = min(right_stop, right_start + take)
+        left_count = left_stop - cut
+        if left_count <= 0 or right_end <= right_start:
+            continue
+        strict = left_page.strict[cut:left_stop] + right_page.strict[right_start:right_end]
+        loose = left_page.loose[cut:left_stop] + right_page.loose[right_start:right_end]
+        for local_start, local_end, kind, score, explanation, ocr_like in _search_string(
+            strict, loose, needle_strict, needle_loose, settings, table
+        ):
+            if local_start >= left_count or local_end <= left_count:
+                continue
+            left_from = cut + local_start
+            right_to = right_start + (local_end - left_count)
+            if left_page.page_index == right_page.page_index and left_stop == right_start:
+                pieces = ((left_page.page_index, left_from, right_to),)
+            else:
+                pieces = (
+                    (left_page.page_index, left_from, left_stop),
+                    (right_page.page_index, right_start, right_to),
+                )
+            found.append(_Match(pieces, kind, score, explanation, ocr_like))
+    return found
 
 
 def _search_string(
@@ -90,15 +138,13 @@ def _search_string(
         position = found + max(n, 1)
 
     threshold = settings.fuzzy_threshold
+    max_distance = _max_distance(n, threshold)
     if n <= 3:
         windows = (n,)
-        max_distance = 1
     else:
-        max_distance = int((1.0 - threshold) * max(n, 1) + 1e-9)
         low = max(2, n - max_distance)
         high = min(len(strict), n + max_distance)
         windows = tuple(range(low, high + 1))
-        max_distance = max(max_distance, 1)
 
     covered = [(item[0], item[1]) for item in raw]
     for width in windows:
@@ -132,6 +178,7 @@ def _search_string(
             explanation = _explain(needle_strict, window)
             raw.append((index, index + width, MatchKind.FUZZY, score, explanation, ocr_like, 1))
 
+    raw = _complete_short(raw, strict, needle_strict, threshold, table)
     raw.sort(key=lambda item: (-item[3], item[6], item[0], -(item[1] - item[0])))
     chosen: list[tuple[int, int, MatchKind, float, str, bool]] = []
     taken: list[tuple[int, int]] = []
@@ -142,6 +189,128 @@ def _search_string(
         chosen.append((start, end, kind, score, explanation, ocr_like))
     chosen.sort(key=lambda item: item[0])
     return chosen
+
+
+def _max_distance(length: int, threshold: float) -> int:
+    if length <= 3:
+        return 1
+    return max(int((1.0 - threshold) * max(length, 1) + 1e-9), 1)
+
+
+def _complete_short(
+    raw: list[tuple[int, int, MatchKind, float, str, bool, int]],
+    strict: str,
+    needle: str,
+    threshold: float,
+    table: ConfusableTable,
+) -> list[tuple[int, int, MatchKind, float, str, bool, int]]:
+    """A short fuzzy hit must cover the rest of the term when those chars sit next to it."""
+    extra: list[tuple[int, int, MatchKind, float, str, bool, int]] = []
+    width = len(needle)
+    for start, end, _kind, score, _explanation, _was_ocr, _rank in raw:
+        if end - start >= width or end > len(strict):
+            continue
+        missing = needle[end - start :]
+        if (
+            missing
+            and strict.startswith(needle[: end - start], start)
+            and strict.startswith(missing, end)
+        ):
+            extra.append((start, end + len(missing), MatchKind.EXACT, 1.0, "", False, 0))
+            continue
+        grown = min(len(strict), start + width)
+        if grown <= end:
+            continue
+        window = strict[start:grown]
+        distance = _levenshtein_at_most(window, needle, max(width, len(window)))
+        if distance is None:
+            continue
+        new_score = 1.0 - (distance / max(width, len(window)))
+        if new_score <= score + 1e-9:
+            continue
+        if new_score + 1e-9 < threshold and window != needle:
+            continue
+        extra.append(
+            (
+                start,
+                grown,
+                MatchKind.EXACT if distance == 0 else MatchKind.FUZZY,
+                new_score,
+                _explain(needle, window),
+                _ocr_like(window, needle, table),
+                0,
+            )
+        )
+    return raw + extra
+
+
+def _pick(matches: list[_Match]) -> list[_Match]:
+    ranked = sorted(
+        matches,
+        key=lambda item: (
+            item.kind != MatchKind.EXACT,
+            -item.score,
+            -item.length(),
+            item.pieces[0][0],
+            item.pieces[0][1],
+        ),
+    )
+    taken: set[tuple[int, int]] = set()
+    kept: list[_Match] = []
+    for match in ranked:
+        cells = [
+            (page, index)
+            for page, start, end in match.pieces
+            for index in range(start, end)
+        ]
+        if any(cell in taken for cell in cells):
+            continue
+        taken.update(cells)
+        kept.append(match)
+    kept.sort(key=lambda item: (item.pieces[0][0], item.pieces[0][1]))
+    return kept
+
+
+def _hits_for(pages: tuple[PageIndex, ...] | list[PageIndex], match: _Match) -> list[Hit]:
+    by_index = {page.page_index: page for page in pages}
+    groups: list[tuple[PageIndex, list[Glyph]]] = []
+    lines = {}
+    all_glyphs: list[Glyph] = []
+    for page_index, start, end in match.pieces:
+        page = by_index[page_index]
+        glyphs = list(page.glyphs[start:end])
+        if not glyphs:
+            continue
+        groups.append((page, glyphs))
+        all_glyphs.extend(glyphs)
+        lines.update(page.lines)
+    if not all_glyphs:
+        return []
+    surface = surface_of(all_glyphs, lines)
+    hits: list[Hit] = []
+    for page, glyphs in groups:
+        parts = parts_of(glyphs)
+        hits.append(
+            Hit(
+                page_index=page.page_index,
+                surface=surface,
+                bbox=bbox_of(glyphs) if len(parts) == 1 else _union(parts),
+                kind=match.kind,
+                score=match.score,
+                explanation=match.explanation,
+                line_ids=line_ids_of(glyphs),
+                ocr_like=match.ocr_like,
+                parts=parts,
+            )
+        )
+    return hits
+
+
+def _union(parts: tuple[Rect, ...]) -> Rect:
+    rect = parts[0]
+    for part in parts[1:]:
+        rect = rect.union(part)
+    return rect
 
 
 def _ocr_like(window: str, needle: str, table: ConfusableTable) -> bool:

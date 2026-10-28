@@ -702,6 +702,7 @@ class MainWindow(QMainWindow):
                     {
                         "id": tracked.id,
                         "bbox": tracked.hit.bbox,
+                        "parts": tracked.hit.parts,
                         "kind": tracked.hit.kind,
                         "adjusted": tracked.adjusted,
                         "line_ids": tracked.hit.line_ids,
@@ -975,6 +976,7 @@ class MainWindow(QMainWindow):
                     for hit in canvas.hits:
                         if hit["id"] == hit_id:
                             hit["bbox"] = tracked.hit.bbox
+                            hit["parts"] = tracked.hit.parts
                             hit["adjusted"] = tracked.adjusted
                     canvas.selected_hit = hit_id
                     canvas.update()

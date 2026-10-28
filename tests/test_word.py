@@ -54,6 +54,13 @@ class _View:
 class _Doc:
     def __init__(self) -> None:
         self.ActiveWindow = type("Window", (), {"View": _View()})()
+        self.Fields = []
+        self.InlineShapes = []
+        self.Shapes = []
+        self.StoryRanges = []
+        self.AttachedTemplate = r"C:\Users\Public\Normal.dotm"
+        self.UpdateStylesOnOpen = True
+        self.MailMerge = type("Merge", (), {"State": 0})()
         self.export_args = None
         self.closed = None
         self.saved = False
@@ -68,6 +75,9 @@ class _Doc:
     def Save(self) -> None:
         self.saved = True
 
+    def Update(self) -> None:
+        raise AssertionError("Update")
+
 
 class _Documents:
     def __init__(self, document: _Doc) -> None:
@@ -79,6 +89,8 @@ class _Documents:
         self.opened_args = args
         self.opened_kwargs = kwargs
         self.security_at_open = self.word.AutomationSecurity
+        self.links_at_open = self.word.Options.UpdateLinksAtOpen
+        self.feature_at_open = self.word.FeatureInstall
         return self.document
 
 
@@ -89,6 +101,9 @@ class _Word:
         self.Visible = True
         self.DisplayAlerts = 1
         self.AutomationSecurity = 1
+        self.Options = type("Options", (), {"UpdateLinksAtOpen": True})()
+        self.FeatureInstall = 1
+        self.NormalTemplate = r"C:\Users\Public\Normal.dotm"
 
 
 def test_export_asks_for_the_final_view_without_markup_or_properties(tmp_path):
@@ -105,6 +120,10 @@ def test_export_asks_for_the_final_view_without_markup_or_properties(tmp_path):
     assert opened[3] is False
     assert opened[4] == "ekisui"
     assert opened[14] is True
+    assert word.Documents.links_at_open is False
+    assert word.Documents.feature_at_open == 0
+    assert word.Options.UpdateLinksAtOpen is True
+    assert word.FeatureInstall == 1
     export = word.Documents.document.export_args
     assert export[1] == 17
     assert export[7] == 0

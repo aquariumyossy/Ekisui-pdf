@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QLineEdit, QMenu, QPushButton, QScrollArea, QToolTip, QWidget
 
@@ -10,9 +10,13 @@ from ekisui.gui.zoom import page_at_scroll, stack_offsets
 _HANDLE = 8.0
 _PAGE_PAD = 18
 _PAGE_GAP = 16
-_LEFT_TIP = "左にドラッグすると範囲の先頭を1文字ずつ動かします。"
-_RIGHT_TIP = "右にドラッグすると範囲の末尾を1文字ずつ動かします。"
+_LEFT_TIP = "左にドラッグすると範囲の先頭を1文字ずつ動かします。Enterで決定します。"
+_RIGHT_TIP = "右にドラッグすると範囲の末尾を1文字ずつ動かします。Enterで決定します。"
 _MARKER_TIP = "手動で範囲を調整しました。"
+
+
+def _exec_menu(menu: QMenu, pos) -> object:
+    return menu.exec(pos)
 
 
 def _turn_wheel(view: "PageView", event) -> bool:
@@ -147,7 +151,9 @@ class PageCanvas(QWidget):
         self.ok_button.hide()
         self.ok_button.clicked.connect(self._confirm_edit)
         self._edit_line = ""
+        self._swallow_nav_key = False
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
 
     def set_zoom(self, zoom: float) -> None:
         self.zoom = max(0.25, min(zoom, 4.0))
@@ -232,22 +238,52 @@ class PageCanvas(QWidget):
             return
         line_id = self._edit_line
         text = self.editor.text()
+        self._keep_edit_key()
         self.cancel_edit()
         self.editConfirmed.emit(line_id, text)
 
+    def _keep_edit_key(self) -> None:
+        """Enter or Esc just closed the line editor. Do not also drop the handles."""
+        self._swallow_nav_key = True
+        QTimer.singleShot(0, self._release_edit_key)
+
+    def _release_edit_key(self) -> None:
+        self._swallow_nav_key = False
+
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
         if obj is self.editor and event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+            self._keep_edit_key()
             self.cancel_edit()
             self.editCancelled.emit()
             return True
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
+        if self._swallow_nav_key and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape):
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Escape and self.editor.isVisible():
+            self._keep_edit_key()
             self.cancel_edit()
             self.editCancelled.emit()
             return
+        if (
+            self.selected_hit
+            and not self.editor.isVisible()
+            and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape)
+        ):
+            self._deselect()
+            event.accept()
+            return
         super().keyPressEvent(event)
+
+    def _deselect(self) -> None:
+        """Hide the handles. The adjusted range stays until 自動の範囲に戻す."""
+        if not self.selected_hit:
+            return
+        self.selected_hit = ""
+        self.update()
+        self.hitSelected.emit("")
 
     def wheelEvent(self, event) -> None:  # noqa: N802
         view = self._scroll_area()
@@ -265,6 +301,7 @@ class PageCanvas(QWidget):
         if handle is not None and not self.region_mode:
             self._handle = handle
             self.hitSelected.emit(handle[0])
+            self.setFocus()
             return
         x, y = self.page_point(event.position())
         if self.region_mode:
@@ -275,12 +312,15 @@ class PageCanvas(QWidget):
         hit = self._hit_at(x, y)
         if hit is not None and self.show_hits and not self.show_boxes:
             self.hitSelected.emit(hit["id"])
+            self.setFocus()
             return
         if self.show_lines:
             for line in reversed(self.lines):
                 if line.bbox.contains(x, y):
                     self.lineActivated.emit(line.id)
                     return
+        if self.selected_hit and not self._edit_line:
+            self._deselect()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._handle is not None:
@@ -316,8 +356,7 @@ class PageCanvas(QWidget):
             return
         menu = QMenu(self)
         action = menu.addAction("自動の範囲に戻す")
-        chosen = menu.exec(event.globalPosition().toPoint())
-        if chosen is action:
+        if _exec_menu(menu, event.globalPosition().toPoint()) is action:
             self.hitRestore.emit(hit["id"])
 
     def _hover_tip(self, event) -> None:

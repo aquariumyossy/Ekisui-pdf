@@ -57,6 +57,62 @@ def test_single_quoted_vml_and_explicit_relationship_are_removed(tmp_path) -> No
     assert "photo.png" not in blob
 
 
+def _package(directory: Path, parts: dict[str, bytes]) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    source = directory / "sample.docx"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>',
+        )
+        archive.writestr(
+            "_rels/.rels",
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>',
+        )
+        for name, data in parts.items():
+            archive.writestr(name, data)
+    source.write_bytes(buffer.getvalue())
+    return source
+
+
+def test_rtf_altchunk_utf16_rels_and_open_field_do_not_reach_word(tmp_path) -> None:
+    rtf = _package(tmp_path, {
+        "word/chunk.rtf": b'{\\rtf1 INCLUDEPICTURE "http://example.invalid/a.png"}',
+    })
+    with pytest.raises(WordConvertError) as caught:
+        neutralize_docx(rtf, tmp_path / "rtf-out.docx")
+    assert "外部" in str(caught.value)
+
+    rels = (
+        '<?xml version="1.0" encoding="UTF-16"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
+        'Target="http://example.invalid/photo.png" TargetMode="External"/>'
+        "</Relationships>"
+    ).encode("utf-16")
+    utf16 = _package(tmp_path / "utf", {"word/_rels/document.xml.rels": rels})
+    dest = tmp_path / "utf-clean.docx"
+    neutralize_docx(utf16, dest)
+    assert b"example.invalid" not in dest.read_bytes()
+
+    document = """<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body><w:p><w:r>
+    <w:fldChar w:fldCharType="begin"/>
+    <w:instrText> INCLUDEPICTURE "http://example.invalid/open.png" </w:instrText>
+    <w:t>残す</w:t>
+  </w:r></w:p></w:body>
+</w:document>
+""".encode()
+    opened = _package(tmp_path / "open", {"word/document.xml": document})
+    out = tmp_path / "open-clean.docx"
+    neutralize_docx(opened, out)
+    text = "\n".join(_parts(out.read_bytes()).values())
+    assert "open.png" not in text
+    assert "残す" in text
+
+
 def test_remote_forms() -> None:
     assert is_remote("file:////fileserver/share/secret.dotx")
     assert is_remote("file://fileserver/share/secret.dotx")

@@ -110,6 +110,9 @@ def neutralize_docx(source: Path, dest: Path) -> None:
             files = {info.filename: archive.read(info.filename) for info in archive.infolist() if not info.is_dir()}
     except zipfile.BadZipFile as exc:
         raise WordConvertError(_EXTERNAL) from exc
+    for name, data in files.items():
+        if _foreign_part_fetches(name, data):
+            raise WordConvertError(_EXTERNAL)
     if not any(_part_fetches(name, data) for name, data in files.items()):
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(source.read_bytes())
@@ -141,7 +144,7 @@ def neutralize_docx(source: Path, dest: Path) -> None:
     for name, data in rewritten.items():
         lower = name.lower()
         if lower.endswith((".xml", ".rels", ".htm", ".html")) and _markup_fetches(
-            data.decode("utf-8", errors="replace"), lower.endswith(".rels")
+            _decode_part(data), lower.endswith(".rels")
         ):
             raise WordConvertError(_EXTERNAL)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -185,10 +188,46 @@ def _text_has_remote_word_target(text: str) -> bool:
     return False
 
 
+def _decode_part(data: bytes) -> str:
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = data.decode("utf-16")
+    elif b'encoding="UTF-16"' in data[:240] or b"encoding='UTF-16'" in data[:240]:
+        text = data.decode("utf-16")
+    else:
+        text = data.decode("utf-8")
+    return text.replace('encoding="UTF-16"', 'encoding="UTF-8"').replace("encoding='UTF-16'", "encoding='UTF-8'")
+
+
 def _part_fetches(name: str, data: bytes) -> bool:
     if not _is_markup(name):
         return False
-    return _markup_fetches(data.decode("utf-8", errors="replace"), name.lower().endswith(".rels"))
+    return _markup_fetches(_decode_part(data), name.lower().endswith(".rels"))
+
+
+def _foreign_part_fetches(name: str, data: bytes) -> bool:
+    """RTF, MHT, and SVG are not markup parts, but Word imports them on open."""
+    lower = name.lower()
+    if not lower.endswith((".rtf", ".mht", ".mhtml", ".svg", ".css")):
+        return False
+    for encoding in ("utf-8", "utf-16", "latin-1"):
+        try:
+            text = data.decode(encoding)
+        except UnicodeError:
+            continue
+        if _embedded_fetch_text(text):
+            return True
+    return False
+
+
+def _embedded_fetch_text(text: str) -> bool:
+    if re.search(r"\b(INCLUDEPICTURE|INCLUDETEXT|DDEAUTO)\b", text, re.IGNORECASE) and contains_remote(text):
+        return True
+    for match in re.finditer(r"https?://[^\s\"'<>]+", text, re.IGNORECASE):
+        url = match.group(0).lower()
+        if any(host in url for host in ("schemas.openxmlformats.org", "schemas.microsoft.com", "purl.org", "www.w3.org")):
+            continue
+        return True
+    return bool(re.search(r"(?<![A-Za-z0-9:])\\\\[^\s\"']+", text) or "file:////" in text.lower())
 
 
 def _part_for_relationships(name: str) -> str | None:
@@ -212,13 +251,13 @@ def _is_markup(name: str) -> bool:
 
 
 def _rewrite_relationships(data: bytes) -> tuple[bytes, set[str]]:
-    text = data.decode("utf-8")
+    text = _decode_part(data)
     edited, dropped = _edit_relationships(text)
     return edited.encode("utf-8"), dropped
 
 
 def _rewrite_document_part(data: bytes, dropped: set[str]) -> bytes:
-    text = data.decode("utf-8")
+    text = _decode_part(data)
     edited = _edit_markup(text, dropped)
     if _markup_fetches(edited, rels=False):
         raise WordConvertError(_EXTERNAL)
@@ -250,6 +289,10 @@ def _markup_fetches(xml: str, rels: bool) -> bool:
     for instruction in _field_instructions(xml):
         if _FETCH_FIELD.search(instruction) or contains_remote(instruction):
             return True
+    if re.search(r"""(?:src|href)\s*=\s*https?://""", xml, re.IGNORECASE):
+        return True
+    if re.search(r"""url\(\s*['\"]?https?://""", xml, re.IGNORECASE):
+        return True
     for url in _markup_urls(xml):
         if is_remote(url) or contains_remote(url):
             return True
@@ -321,6 +364,7 @@ def _complex_instructions(xml: str) -> list[list[str]]:
             close = re.search(r"</(?:[\w.]+:)?instrText\s*>", xml[match.end() :], re.IGNORECASE)
             if close:
                 stack[-1].append(html.unescape(xml[match.end() : match.end() + close.start()]))
+    fields.extend(stack)
     return fields
 
 

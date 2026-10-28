@@ -315,7 +315,10 @@ class PageCanvas(QWidget):
                 if line.bbox.contains(x, y):
                     self.lineActivated.emit(line.id)
                     return
-        if self.selected_hit and not self._edit_line:
+        if self._edit_line:
+            self.editor.setFocus()
+            return
+        if self.selected_hit:
             self._deselect()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802

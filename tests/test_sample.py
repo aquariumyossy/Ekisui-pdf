@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pymupdf
+import pytest
 
 from ekisui.domain.session import Session
 from ekisui.domain.types import Category, SaveOptions, Settings
@@ -33,6 +34,10 @@ EXPECTED = (
 )
 
 
+@pytest.mark.skipif(
+    not Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc").is_file(),
+    reason="同梱PDFは WenQuanYi Micro Hei で描いている",
+)
 def test_sample_script_matches_the_committed_pdfs(tmp_path: Path) -> None:
     subprocess.check_call([sys.executable, str(ROOT / "tools" / "make_sample.py"), str(tmp_path)])
     for name in (SCAN.name, TEXT.name):

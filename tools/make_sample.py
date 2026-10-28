@@ -160,15 +160,21 @@ def _save_stable(doc: pymupdf.Document, path: Path) -> None:
     buffer = io.BytesIO()
     doc.save(buffer, deflate=True, garbage=4)
     data = buffer.getvalue()
+    path.write_bytes(_pin_id(data))
+
+
+def _pin_id(data: bytes) -> bytes:
+    """Replace the trailer ID. Windows sometimes writes the second half as a literal."""
+    marker = data.rfind(b"trailer")
+    if marker < 0:
+        raise RuntimeError("PDF trailer is missing")
+    trailer = data[marker:]
     ident = b"00112233445566778899AABBCCDDEEFF"
     pinned = b"/ID[<" + ident + b"><" + ident + b">]"
-    # The trailer ID is the last one. Its spacing varies between saves.
-    matches = list(re.finditer(rb"/ID\s*\[\s*<[0-9A-Fa-f \n\r]+>\s*<[0-9A-Fa-f \n\r]+>\s*\]", data))
-    if not matches:
-        tail = data[-240:]
-        raise RuntimeError(f"PDF ID was not pinned: {tail!r}")
-    match = matches[-1]
-    path.write_bytes(data[: match.start()] + pinned + data[match.end() :])
+    updated, count = re.subn(rb"/ID\s*\[.*?\](?=\s*>>)", pinned, trailer, count=1, flags=re.S)
+    if count != 1:
+        raise RuntimeError(f"PDF ID was not pinned: {trailer[-240:]!r}")
+    return data[:marker] + updated
 
 
 def _stamp_dates(doc: pymupdf.Document) -> None:

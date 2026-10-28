@@ -142,6 +142,24 @@ def test_enter_and_esc_stay_in_the_editor_and_the_search_box(tmp_path) -> None:
 
     line = window.session.document.pages[0].lines[0]
     canvas.begin_edit(line)
+    canvas.editor.setText("CHANGED")
+    canvas.setFocus()
+    QTest.keyClick(canvas, Qt.Key.Key_Escape)
+    app.processEvents()
+    assert canvas.editor.isVisible()
+    assert canvas.editor.text() == "CHANGED"
+    assert window.selected_hit == ""
+    assert tracked.hit.surface == surface
+    window._select_hit(tracked.id)
+    box = next(hit["bbox"] for hit in canvas.hits if hit["id"] == tracked.id)
+    _press(canvas, canvas._origin.x() + box.x1 * canvas.zoom + 40, canvas._origin.y() + box.y0 * canvas.zoom)
+    app.processEvents()
+    assert window.selected_hit == ""
+    assert canvas.editor.isVisible()
+    assert canvas.editor.text() == "CHANGED"
+    assert app.focusWidget() is canvas.editor
+    window._select_hit(tracked.id)
+    canvas.begin_edit(line)
     QTest.keyClick(canvas.editor, Qt.Key.Key_Escape)
     app.processEvents()
     assert canvas.editor.isHidden()

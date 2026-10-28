@@ -258,15 +258,7 @@ class PageCanvas(QWidget):
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
-        if event.key() == Qt.Key.Key_Escape and self.editor.isVisible():
-            self.cancel_edit()
-            self.editCancelled.emit()
-            return
-        if (
-            self.selected_hit
-            and not self.editor.isVisible()
-            and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape)
-        ):
+        if self.selected_hit and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape):
             self._deselect()
             event.accept()
             return
@@ -315,11 +307,10 @@ class PageCanvas(QWidget):
                 if line.bbox.contains(x, y):
                     self.lineActivated.emit(line.id)
                     return
-        if self._edit_line:
-            self.editor.setFocus()
-            return
         if self.selected_hit:
             self._deselect()
+        if self._edit_line:
+            self.editor.setFocus()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._handle is not None:

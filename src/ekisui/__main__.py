@@ -48,7 +48,7 @@ def main() -> int:
     app.setStyleSheet(QSS)
     window = MainWindow()
     window.show()
-    if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".pdf"):
+    if len(sys.argv) > 1 and Path(sys.argv[1]).suffix.lower() in {".pdf", ".doc", ".docx"}:
         window.open_path(sys.argv[1])
     return app.exec()
 

@@ -56,7 +56,19 @@ a = Analysis(
     pathex=["src"],
     binaries=binaries,
     datas=datas,
-    hiddenimports=hidden + ["ekisui.gui.window", "ekisui.pdf.ocr_engine", "ekisui.pdf.export", "ekisui.smoke"],
+    hiddenimports=hidden
+    + [
+        "ekisui.gui.window",
+        "ekisui.pdf.ocr_engine",
+        "ekisui.pdf.export",
+        "ekisui.pdf.wordconvert",
+        "ekisui.smoke",
+    ]
+    + (
+        ["win32com", "win32com.client", "pythoncom", "pywintypes"]
+        if sys.platform == "win32"
+        else []
+    ),
     excludes=analysis_excludes(),
     noarchive=False,
 )

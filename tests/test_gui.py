@@ -64,8 +64,8 @@ def test_toolbar_and_mask_save_flow(tmp_path) -> None:
         if isinstance(widget, QPushButton):
             labels.append(widget.text())
     assert labels == ["開く", "OCR実行", "▾", "マスキング実行", "範囲で選ぶ", "保存", "設定"]
-    assert window.btn_ocr.toolTip() == "スキャン画像の文字を読み取り、検索できるPDFにします。マスキングはしません。"
-    assert window.btn_mask.toolTip() == "個人情報などのマスキング候補を自動で探し、右の一覧に出します。"
+    assert window.btn_ocr.toolTip() == "スキャン画像の文字を読み取り、検索できるPDFにします。マスキングはしません。文字データのあるPDFと、Wordから変換したPDFには使いません。"
+    assert window.btn_mask.toolTip() == "開いているPDFから、個人情報などのマスキング候補を自動で探します。Wordは変換したPDFが対象です。"
     assert window.btn_region.toolTip() == "ページ上をドラッグして、マスキングする範囲を選べます。"
     assert window.btn_confirm.text() == "確定…"
     assert window.findChildren(QPushButton, "自動候補") == []

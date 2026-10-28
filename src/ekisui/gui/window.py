@@ -44,11 +44,12 @@ from ekisui.domain.types import (
     Settings,
     TextSource,
 )
-from ekisui.errors import EkisuiError
+from ekisui.errors import EkisuiError, WordConvertError
 from ekisui.gui.pageview import PageCanvas, PageView
 from ekisui.gui.zoom import scroll_to_keep_point
 from ekisui.gui.panels import CandidatePanel, OcrPanel, TablePanel
 from ekisui.pdf.document import open_document, pages_need_ocr, pdf_path, recognize
+from ekisui.pdf.wordconvert import convert_word_to_pdf
 from ekisui.pdf.export import export_pdf, redaction_boxes, unique_destination
 from ekisui.pdf.ocr_engine import PpOcrV5
 from ekisui.pdf.verify import VerifyReport, verify_pdf
@@ -186,7 +187,7 @@ class MainWindow(QMainWindow):
         foot_box.setContentsMargins(10, 4, 10, 8)
         self.btn_confirm = QPushButton("確定…")
         _mark(self.btn_confirm, "primary")
-        self.btn_confirm.setToolTip("選んだ箇所のマスキングを確定します。画像と文字を消す処理です。")
+        self.btn_confirm.setToolTip("選んだ箇所のマスキングを、開いているPDFに確定します。画像と文字を消す処理です。元のファイルは変更しません。")
         self.btn_confirm.clicked.connect(self._open_confirm)
         foot_box.addStretch(1)
         foot_box.addWidget(self.btn_confirm)
@@ -228,10 +229,10 @@ class MainWindow(QMainWindow):
         bar.setFixedHeight(64)
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(8, 4, 8, 4)
-        self.btn_open = self._tool("開く", "PDFを開きます。（Ctrl+O）", self._pick_pdf, primary=True)
+        self.btn_open = self._tool("開く", "PDFまたはWord（.doc / .docx）を開きます。WordはPDFに変換してから表示します。（Ctrl+O）", self._pick_pdf, primary=True)
         self.btn_ocr = self._tool(
             "OCR実行",
-            "スキャン画像の文字を読み取り、検索できるPDFにします。マスキングはしません。",
+            "スキャン画像の文字を読み取り、検索できるPDFにします。マスキングはしません。文字データのあるPDFと、Wordから変換したPDFには使いません。",
             self.start_ocr,
         )
         self.btn_ocr_menu = QPushButton("▾")
@@ -241,7 +242,7 @@ class MainWindow(QMainWindow):
         self.btn_ocr_menu.clicked.connect(self._toggle_ocr_pop)
         self.btn_mask = self._tool(
             "マスキング実行",
-            "個人情報などのマスキング候補を自動で探し、右の一覧に出します。",
+            "開いているPDFから、個人情報などのマスキング候補を自動で探します。Wordは変換したPDFが対象です。",
             self.start_mask,
         )
         self.btn_region = self._tool(
@@ -343,11 +344,11 @@ class MainWindow(QMainWindow):
         drop.setFixedSize(440, 220)
         inner = QVBoxLayout(drop)
         inner.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        caption = QLabel("PDFをここにドロップ")
+        caption = QLabel("PDFまたはWordをここにドロップ")
         caption.setStyleSheet("font-size: 16px; color: #5c5c5c;")
-        button = QPushButton("PDFを開く")
+        button = QPushButton("ファイルを開く")
         _mark(button, "primary")
-        button.setToolTip("PDFを開きます。（Ctrl+O）")
+        button.setToolTip("PDFまたはWord（.doc / .docx）を開きます。WordはPDFに変換してから表示します。（Ctrl+O）")
         button.clicked.connect(self._pick_pdf)
         inner.addWidget(caption, alignment=Qt.AlignmentFlag.AlignCenter)
         inner.addWidget(button, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -427,22 +428,39 @@ class MainWindow(QMainWindow):
     def dropEvent(self, event) -> None:  # noqa: N802
         for url in event.mimeData().urls():
             path = url.toLocalFile()
-            if path.lower().endswith(".pdf"):
+            if Path(path).suffix.lower() in {".pdf", ".doc", ".docx"}:
                 self.open_path(path)
                 return
 
     def open_path(self, path: str) -> None:
         if self.ocr_running:
-            QMessageBox.warning(self, "ekisui-pdf", "文字の読み取りが終わるまで、別のPDFは開けません。")
+            QMessageBox.warning(self, "ekisui-pdf", "文字の読み取りが終わるまで、別のファイルは開けません。")
             return
+        source = Path(path)
+        suffix = source.suffix.lower()
+        if suffix not in {".pdf", ".doc", ".docx"}:
+            QMessageBox.warning(self, "ekisui-pdf", "PDF または Word（.doc / .docx）を指定してください。")
+            return
+        load_path = source
+        if suffix in {".doc", ".docx"}:
+            try:
+                load_path = convert_word_to_pdf(source, self.work_dir)
+            except WordConvertError as exc:
+                QMessageBox.warning(self, "ekisui-pdf", str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(self, "ekisui-pdf", f"Word を PDF に変換できませんでした。\n{exc}")
+                return
         try:
-            document = open_document(path)
+            document = open_document(load_path)
         except EkisuiError as exc:
             QMessageBox.warning(self, "ekisui-pdf", str(exc))
             return
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "ekisui-pdf", f"PDFを開けませんでした。\n{exc}")
             return
+        if suffix in {".doc", ".docx"}:
+            document = replace(document, source_path=str(source.resolve()), working_path=str(load_path))
         self.session = Session(document, self.settings)
         self.page_index = 0
         self.preview = False
@@ -505,7 +523,9 @@ class MainWindow(QMainWindow):
         pages = self.session.document.pages
         self.file_label.setText(path.name)
         kinds = {page.kind for page in pages}
-        if kinds == {PageKind.NATIVE}:
+        if path.suffix.lower() in {".doc", ".docx"} and kinds == {PageKind.NATIVE}:
+            kind = "Wordから変換"
+        elif kinds == {PageKind.NATIVE}:
             kind = "テキストPDF"
         elif kinds == {PageKind.SCANNED}:
             kind = "スキャンPDF"
@@ -795,7 +815,12 @@ class MainWindow(QMainWindow):
         self._show_page()
 
     def _pick_pdf(self) -> None:
-        path, _filter = QFileDialog.getOpenFileName(self, "PDFを開く", "", "PDF (*.pdf)")
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "ファイルを開く",
+            "",
+            "文書 (*.pdf *.docx *.doc);;PDF (*.pdf);;Word (*.docx *.doc)",
+        )
         if path:
             self.open_path(path)
 
@@ -864,8 +889,8 @@ class MainWindow(QMainWindow):
         if self.session.groups and not self.session.confirmed:
             return "候補が未確定です。読み取ったPDFだけ保存するか、確定に進むかを選べます。"
         if self.session.confirmed or self.session.committed:
-            return "マスキングしたPDFを別名で保存します。消し残りも確認します。"
-        return "読み取った文字だけのPDFを別名で保存します。マスキングはしません。"
+            return "マスキングしたPDFを別名で保存します。消し残りも確認します。元のファイルは変更しません。"
+        return "読み取った文字だけのPDFを別名で保存します。マスキングはしません。元のファイルは変更しません。"
 
     def _on_split(self, _pos: int, _index: int) -> None:
         sizes = self.split.sizes()
@@ -1244,7 +1269,7 @@ class MainWindow(QMainWindow):
         cancel.clicked.connect(self.shade.hide)
         go = QPushButton("確定する")
         _mark(go, "danger")
-        go.setToolTip("選んだ箇所の確定に進みます。元のPDFは変更しません。")
+        go.setToolTip("選んだ箇所の確定に進みます。対象は開いているPDFです。元のファイルは変更しません。")
         go.clicked.connect(self._confirm)
         buttons.addStretch(1)
         buttons.addWidget(cancel)

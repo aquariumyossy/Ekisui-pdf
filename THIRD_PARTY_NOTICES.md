@@ -57,9 +57,8 @@ PyMuPDF（AGPL）を使っているため、このアプリ全体を AGPL-3.0 �
 
 アイコンの「蕭」は、次のフォントのアウトラインを図形にしたものです。フォントファイル自体は同梱していません。
 
-- 16・24・32・48: Noto Sans CJK JP Bold 2.004
-- 64・128・256 と 1024 の明朝マスター: Noto Serif CJK JP
-- 著作権: Copyright © 2014-2021 Adobe. Reserved Font Name「Source」
+- 16・24・32・48: Noto Sans CJK JP Bold 2.004。Copyright © 2014-2021 Adobe. Reserved Font Name「Source」
+- 64・128・256 と 1024 の明朝マスター: Noto Serif CJK JP Bold 2.003。Copyright © 2017-2024 Adobe. Reserved Font Name「Source」
 - ライセンス: SIL Open Font License 1.1
 - 全文: `assets/icon/OFL-NotoSansCJKJP.txt`、`assets/icon/OFL-NotoSerifCJKJP.txt`
 - https://github.com/notofonts/noto-cjk

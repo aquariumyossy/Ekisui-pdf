@@ -121,5 +121,5 @@ def test_window_icon_keeps_every_frame():
     icon = load_app_icon()
     assert icon_file().is_file()
     loaded = {(size.width(), size.height()) for size in icon.availableSizes()}
-    assert {(16, 16), (32, 32), (48, 48), (256, 256)} <= loaded
+    assert loaded == {(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)}
     app.processEvents()
